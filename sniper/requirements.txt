@@ -1,0 +1,4 @@
+httpx>=0.26
+aiosmtplib>=3.0
+playwright>=1.40
+python-dotenv>=1.0
