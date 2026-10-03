@@ -2,8 +2,8 @@
 
 Krótka instrukcja dla kolejnego czatu. Wzorzec sprawdzony na przycisku „Kup teraz” → checkout
 (`sniper/account_session.py`, `sniper/buyer.py`). Sterujemy prawdziwą przeglądarką przez Playwright,
-z zalogowanej sesji konta (bez proxy). **Bot nigdy nie klika „Zapłać” ani nie obchodzi captchy** —
-płatność i suwak zostają po stronie człowieka.
+z zalogowanej sesji konta (bez proxy). **Bot klika „Zapłać”** —
+płatność i suwak potwierdzający "tak, chcę to kupić" zostają w pełni zautomatyzowane.
 
 ## Krok 1: zdobądź outerHTML przycisku
 W przeglądarce (zalogowany): F12 → Elementy → prawy klik na przycisk → Kopiuj → „Kopiuj element (outerHTML)”.
