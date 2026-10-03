@@ -124,6 +124,22 @@ W `sniper/.env` ustaw `SNIPER_SMTP_USER` (pełny adres @onet.pl) i `SNIPER_SMTP_
 python -m sniper.notifier
 ```
 
+## Konto i auto-zakup (w budowie)
+
+Cel: automatyczny zakup okazji z Twojego konta. Budujemy etapami, z twardymi bezpiecznikami.
+
+**Krok 1 - test sesji konta** (`python -m sniper.account`): sprawdza, czy skrypt widzi Cię jako
+zalogowanego. Pobiera `www.vinted.pl` z Twojego domowego IP (BEZ proxy IPRoyal - sesja konta i ciastka
+`cf_clearance`/`datadome` są związane z Twoim IP) i szuka w HTML Twojego loginu.
+
+1. F12 -> Sieć -> zapytanie do vinted.pl -> PPM -> Kopiuj jako cURL (bash).
+2. Wklej do `sniper/logs/my_headers.txt` (folder jest w `.gitignore` - NIE commituj).
+3. `python -m sniper.account`
+4. Po teście wyloguj się w przeglądarce i usuń `my_headers.txt`.
+
+Plik `my_headers.txt` zawiera `access_token_web` = pełny dostęp do konta z kartą. Trzymaj go tylko lokalnie,
+nigdy w repo ani w czacie. Kolejne kroki (link prosto do kasy, potem auto-zakup za limitami) dopiero po tym teście.
+
 ## Logi
 
 * `sniper/logs/sniper.log` – wszystko, co widać w konsoli, plus szczegóły (pełny JSON złapanych ofert,
