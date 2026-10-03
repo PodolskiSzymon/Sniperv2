@@ -200,3 +200,14 @@ def test_attempt_handles_checkout_error(tmp_path):
     nav, ledger = FakeNav(fail_checkout=True), PurchaseLedger(tmp_path)
     result = asyncio.run(attempt_purchase(nav, "url", offer(), cfg(), ledger))
     assert result["status"] == "error" and ("focus",) not in nav.calls
+
+
+def test_cli_requires_url():
+    import pytest as _pytest
+    with _pytest.raises(SystemExit):           # brak URL => argparse kończy z błędem
+        asyncio.run(attempt_cli_noargs())
+
+
+async def attempt_cli_noargs():
+    from sniper.buyer import _cli
+    return await _cli([])

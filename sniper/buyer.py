@@ -206,3 +206,59 @@ async def attempt_purchase(nav, url, offer, cfg: BuyerConfig, ledger):
     log.warning("[BUY] GOTOWE DO ZAPŁATY: %s | %s. Przejdź do przeglądarki, kliknij 'Zapłać' i przesuń suwak.",
                 summarize(parsed), reason)
     return {"status": "ready", "reason": reason, "parsed": parsed}
+
+
+async def _cli(argv=None):
+    """Test auto-zakupu na wklejonym linku: dochodzi do ekranu płatności i ZATRZYMUJE się.
+
+        python -m sniper.buyer "https://www.vinted.pl/items/XXXX-..."
+
+    Otwiera ofertę na Twoim zalogowanym koncie (przez account_session, bez proxy), klika 'Kup teraz',
+    sprawdza limity i czeka - 'Zapłać' oraz suwak klikasz TY w otwartym oknie. Nic nie płaci samo.
+    """
+    import argparse
+    import asyncio
+    import logging
+
+    from .account_session import VintedAccount
+    from .config import ScoutConfig
+
+    parser = argparse.ArgumentParser(description="Test: przygotuj zakup oferty (bez płacenia).")
+    parser.add_argument("url", help="link do oferty na Vinted")
+    parser.add_argument("--max", type=float, help="nadpisz limit sumy (PLN) na ten test")
+    parser.add_argument("--ignore-limits", action="store_true", help="pomiń limity (tylko do testu)")
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    cfg = ScoutConfig()
+    buy_cfg = cfg.buyer
+    if args.max is not None:
+        from dataclasses import replace
+        buy_cfg = replace(buy_cfg, max_total_pln=args.max)
+    if args.ignore_limits:
+        from dataclasses import replace
+        buy_cfg = replace(buy_cfg, max_total_pln=10**9, max_per_day=10**9, pl_only=False, min_score=0.0)
+
+    ledger = PurchaseLedger(cfg.log_dir)
+    account = VintedAccount(cfg.account, cfg.log_dir)
+    try:
+        await account.start()
+        if not account.username:
+            print("Nie potwierdziłem zalogowania - sprawdź my_headers.txt (świeży cURL) i spróbuj --reset.")
+            return 1
+        print(f"Zalogowany jako {account.username}. Przygotowuję zakup (bez płacenia): {args.url}")
+        result = await attempt_purchase(account, args.url, None, buy_cfg, ledger)
+        print(f"\nWynik: {result['status']} - {result['reason']}")
+        if result["status"] == "ready":
+            print("Checkout GOTOWY w oknie przeglądarki. Jeśli chcesz kupić: kliknij 'Zapłać' i przesuń suwak RĘCZNIE.")
+            print("Potem Enter tutaj, żeby zamknąć przeglądarkę (nic nie kliknę za Ciebie).")
+            await asyncio.get_event_loop().run_in_executor(None, input)
+    finally:
+        await account.close()
+    return 0
+
+
+if __name__ == "__main__":
+    import asyncio as _asyncio
+    import sys as _sys
+    raise SystemExit(_asyncio.run(_cli(_sys.argv[1:])))
