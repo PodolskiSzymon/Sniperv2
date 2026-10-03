@@ -78,6 +78,8 @@ def ai_lines(ai):
         ("Maks. cena zakupu", _pln(ev.get("max_buy_price_pln"))),
         ("Potencjalny zysk", _pln(ev.get("potential_profit_pln"))),
         ("Uzasadnienie", ev.get("reasoning") or "-"),
+        ("Zdjęcia (AI)", f"widzi {ev.get('photos_seen', '?')} z {ai.get('photos_sent', '?')}"
+                         + (f": {ev['photo_notes']}" if ev.get("photo_notes") else "")),
         ("Czerwone flagi", "; ".join(ev.get("red_flags") or []) or "brak"),
     ]
 

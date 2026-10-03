@@ -55,11 +55,14 @@ EVALUATION_SCHEMA = {
         "market_value_pln": _nullable("number", "Realna cena szybkiej sprzedaży w PLN."),
         "max_buy_price_pln": _nullable("number", "Maksymalna cena zakupu z wytycznych dla tej karty po wszystkich korektach (seria 3000, kraj sprzedawcy)."),
         "potential_profit_pln": _nullable("number", "market_value_pln - cena łączna - 150 zł kosztów."),
+        "photos_seen": {"type": "integer", "description": "Ile zdjęć z ogłoszenia faktycznie widzisz (0 = żadnego)."},
+        "photo_notes": {"type": "string", "description": "1-2 zdania: co konkretnie widać na zdjęciach (stan, "
+                        "naklejki, ekran, uszkodzenia); pusty tekst, gdy nie widzisz zdjęć."},
         "reasoning": {"type": "string", "description": "2-4 zdania uzasadnienia po polsku."},
         "red_flags": {"type": "array", "items": {"type": "string"}, "description": "Czerwone flagi (pusta lista = brak)."},
     },
     "required": ["is_deal", "score", "gpu_model", "laptop_model", "market_value_pln", "max_buy_price_pln",
-                 "potential_profit_pln", "reasoning", "red_flags"],
+                 "potential_profit_pln", "photos_seen", "photo_notes", "reasoning", "red_flags"],
     "additionalProperties": False,
 }
 
@@ -76,7 +79,8 @@ z wytycznych, po wszystkich korektach z zasad dodatkowych (np. seria 3000, kraj 
 3. market_value_pln = realna cena szybkiej sprzedaży tej konkretnej sztuki (karta, konfiguracja, stan) według \
 wytycznych. potential_profit_pln = market_value_pln - cena łączna - 150 zł (prowizje, przesyłka, negocjacje).
 4. Obejrzyj zdjęcia: pęknięta lub porysowana matryca, uszkodzona obudowa lub zawiasy, brak ładowarki, \
-zdjęcia stockowe albo z internetu zamiast prawdziwych, ekran z hasłem BIOS / blokadą.
+zdjęcia stockowe albo z internetu zamiast prawdziwych, ekran z hasłem BIOS / blokadą. \
+W photos_seen i photo_notes podaj zgodnie z prawdą, ile zdjęć widzisz i co na nich jest - nie zgaduj.
 5. Czerwone flagi: wszystko z wytycznych oraz blokady (BIOS, konto Microsoft, MDM/firmowe), „na części”, \
 „nie włącza się”, niespójności między tytułem, opisem i zdjęciami, cena podejrzanie niska jak na model, \
 nowe konto sprzedawcy bez opinii przy drogim sprzęcie, kontakt lub płatność poza Vinted, tylko odbiór osobisty.
@@ -232,6 +236,8 @@ def normalize_evaluation(text):
         "market_value_pln": _num(data.get("market_value_pln")),
         "max_buy_price_pln": _num(data.get("max_buy_price_pln")),
         "potential_profit_pln": _num(data.get("potential_profit_pln")),
+        "photos_seen": int(_num(data.get("photos_seen")) or 0),
+        "photo_notes": str(data.get("photo_notes") or ""),
         "reasoning": str(data.get("reasoning") or ""),
         "red_flags": [str(f) for f in flags] if isinstance(flags, list) else [str(flags)],
     }
@@ -595,10 +601,16 @@ class OfferEvaluator:
                 return self._record(offer, STATUS_FAILED, error=error,
                                     latency_s=round(time.monotonic() - started, 1))
         self._count("evaluated")
-        log.info("[AI] %s | %s/10%s | %s | zysk ~%s zł | %s", offer.id, f"{evaluation['score']:g}",
-                 " OKAZJA" if evaluation["is_deal"] else "", evaluation["gpu_model"] or "karta ?",
+        log.info("[AI] %s | %s/10%s | %s | zysk ~%s zł | zdjęcia: wysłane %d, AI widzi %d | %s", offer.id,
+                 f"{evaluation['score']:g}", " OKAZJA" if evaluation["is_deal"] else "",
+                 evaluation["gpu_model"] or "karta ?",
                  f"{evaluation['potential_profit_pln']:.0f}" if evaluation["potential_profit_pln"] is not None else "?",
-                 offer.title)
+                 photos, evaluation["photos_seen"], offer.title)
+        if photos and not evaluation["photos_seen"]:
+            log.warning("[AI] %s: wysłano %d zdjęć, ale model ich nie widzi - rozważ SNIPER_AI_PHOTOS=download.",
+                        offer.id, photos)
+        elif evaluation["photo_notes"]:
+            log.info("[AI] %s: na zdjęciach: %s", offer.id, evaluation["photo_notes"])
         return self._record(offer, STATUS_EVALUATED, evaluation=evaluation, usage=usage, attempts=attempts,
                             photos_sent=photos, latency_s=round(time.monotonic() - started, 1))
 
@@ -633,7 +645,8 @@ class OfferEvaluator:
     # ------------------------------------------------------------------ zapis wyników
     CSV_COLUMNS = ("czas", "status", "ocena", "okazja", "mail", "id", "tytul", "cena", "wysylka", "suma",
                    "karta", "laptop", "wartosc_rynkowa", "max_cena_zakupu", "zysk", "czerwone_flagi",
-                   "uzasadnienie", "blad_lub_filtr", "url")
+                   "uzasadnienie", "blad_lub_filtr", "url", "zdjecia_wyslane", "zdjecia_widziane",
+                   "co_na_zdjeciach")
 
     def save(self, record):
         """Każda nowa oferta + odpowiedź AI: pełny JSON (evaluations.jsonl) i tabela do Excela (evaluations.csv)."""
@@ -645,6 +658,13 @@ class OfferEvaluator:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
             path = self.log_dir / "evaluations.csv"
             new = not path.exists()
+            if not new:
+                with path.open(encoding="utf-8-sig") as f:
+                    header = f.readline().strip()
+                if header != ";".join(self.CSV_COLUMNS):
+                    # Stary układ kolumn (poprzednia wersja) - odkładamy plik i zaczynamy nowy.
+                    path.rename(path.with_name(f"evaluations.{time.strftime('%Y%m%d-%H%M%S')}.csv"))
+                    new = True
             # utf-8-sig: Excel poprawnie pokaże polskie znaki (BOM tylko na początku nowego pliku).
             with path.open("a", encoding="utf-8-sig" if new else "utf-8", newline="") as f:
                 writer = csv.writer(f, delimiter=";")
@@ -675,6 +695,8 @@ class OfferEvaluator:
             num(ev.get("max_buy_price_pln")), num(ev.get("potential_profit_pln")),
             one_line(" | ".join(ev.get("red_flags") or [])), one_line(ev.get("reasoning")),
             one_line(record.get("error") or record.get("prefilter_reason")), offer.get("url"),
+            record.get("photos_sent", 0) if ev else "", ev.get("photos_seen", "") if ev else "",
+            one_line(ev.get("photo_notes")),
         )
 
     # ------------------------------------------------------------------ heartbeat i zamykanie
@@ -770,6 +792,8 @@ async def _cli(argv=None):
                 print(f"  {ev['score']:g}/10 {'OKAZJA' if ev['is_deal'] else 'nie kupować'} | {ev['gpu_model']} | "
                       f"wartość {ev['market_value_pln']} | max zakup {ev['max_buy_price_pln']} | "
                       f"zysk {ev['potential_profit_pln']}\n  {ev['reasoning']}")
+                print(f"  zdjęcia: wysłane {record['photos_sent']}, AI widzi {ev['photos_seen']}"
+                      f"{' - ' + ev['photo_notes'] if ev['photo_notes'] else ''}")
                 for flag in ev["red_flags"]:
                     print(f"  ! {flag}")
             else:
