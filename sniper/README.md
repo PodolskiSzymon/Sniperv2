@@ -129,8 +129,8 @@ python -m sniper.notifier
 Cel: automatyczny zakup okazji z Twojego konta. Budujemy etapami, z twardymi bezpiecznikami.
 
 **Krok 1 - test sesji konta** (`python -m sniper.account`): sprawdza, czy skrypt widzi Cię jako
-zalogowanego. Pobiera `www.vinted.pl` z Twojego domowego IP (BEZ proxy IPRoyal - sesja konta i ciastka
-`cf_clearance`/`datadome` są związane z Twoim IP) i szuka w HTML Twojego loginu.
+zalogowanego. Odpytuje `api/v2/banners` z Twojego domowego IP (BEZ proxy IPRoyal - sesja konta i ciastka
+`cf_clearance`/`datadome` są związane z Twoim IP) i czyta Twoją nazwę konta z odpowiedzi.
 
 1. F12 -> Sieć -> zapytanie do vinted.pl -> PPM -> Kopiuj jako cURL (bash).
 2. Wklej do `sniper/logs/my_headers.txt` (folder jest w `.gitignore` - NIE commituj).

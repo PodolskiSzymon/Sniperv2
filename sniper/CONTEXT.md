@@ -37,8 +37,8 @@ python -m pytest sniper/tests        # testy (bez sieci)
 | `dedup.py` | `RecentIds`: `deque(maxlen)` + `set`. |
 | `traffic.py` | Licznik transferu przez proxy (katalog / detale / przeglądarka) → heartbeat + `logs/traffic.csv`. |
 | `diagnose.py` | Narzędzie diagnostyczne. |
-| `account.py` | Krok 1 do auto-zakupu: test, czy nagłówki z przeglądarki logują na konto (pobiera HTML z domowego IP, bez proxy). |
-| `tests/` | 72 testy (pytest; `test_evaluator.py` z atrapami API Gemini i Anthropic), `fixtures.json` = prawdziwe odpowiedzi API. |
+| `account.py` | Krok 1 do auto-zakupu: test, czy nagłówki z przeglądarki logują na konto - odpytuje `api/v2/banners` (nazwa konta), potem strona główna; z domowego IP, bez proxy. |
+| `tests/` | 75 testów (pytest; `test_evaluator.py` z atrapami API Gemini i Anthropic), `fixtures.json` = prawdziwe odpowiedzi API. |
 
 ## Ustalenia o API Vinted (zweryfikowane na żywo przez użytkownika)
 
