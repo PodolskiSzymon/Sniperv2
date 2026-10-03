@@ -80,23 +80,51 @@ def build_headers(pasted):
 
 
 # Oznaki zalogowania w HTML Vinted (JSON z danymi użytkownika wstrzyknięty w stronę).
-_LOGIN_FIELD = re.compile(r'"(?:login|username)"\s*:\s*"([^"]{2,40})"')
-_USER_ID = re.compile(r'"(?:current_)?user_id"\s*:\s*(\d{3,})')
-_ANON = re.compile(r'"(?:is_anon(?:_user)?|anon)"\s*:\s*true')
+# Next.js osadza dane raz zwykłym JSON-em, raz z ekranowanymi cudzysłowami (\" ) albo HTML (&quot;),
+# dlatego przed dopasowaniem normalizujemy cudzysłowy do ".
+_LOGIN_FIELD = re.compile(r'"(?:login|username|real_name)"\s*:\s*"([^"]{2,40})"')
+_USER_ID = re.compile(r'"(?:current_user_id|user_id|"?id)"\s*:\s*"?(\d{4,})')
+_ANON = re.compile(r'"(?:is_anon_user|anon|anonymous)"\s*:\s*true')
+
+
+def _unescape(html):
+    return html.replace('\\"', '"').replace('&quot;', '"').replace('\\u0022', '"')
 
 
 def detect_login(html):
     """Zwraca (zalogowany: bool|None, opis). None = niejednoznaczne (zajrzyj do zapisanego HTML)."""
-    if _ANON.search(html) and not _LOGIN_FIELD.search(html):
+    norm = _unescape(html)
+    login = _LOGIN_FIELD.search(norm)
+    if _ANON.search(norm) and not login:
         return False, "strona zwróciła stan ANONIMOWY (niezalogowany)"
-    login = _LOGIN_FIELD.search(html)
-    user_id = _USER_ID.search(html)
     if login:
+        user_id = _USER_ID.search(norm)
         who = login.group(1) + (f" (id {user_id.group(1)})" if user_id else "")
         return True, f"zalogowany jako: {who}"
     if "/member/" in html and ("Wyloguj" in html or "logout" in html.lower()):
         return True, "znaleziono oznaki zalogowania (link wylogowania), ale bez nazwy konta"
     return None, "nie rozpoznałem jednoznacznie - sprawdź zapisany HTML (szukaj swojej nazwy / 'Wyloguj')"
+
+
+def find_in_saved(out_dir, needle, window=50, limit=5):
+    """Szuka tekstu (np. Twojej nazwy konta) w zapisanym account_check.html i zwraca krótkie fragmenty.
+
+    Pomaga dostroić wykrywanie do realnej struktury HTML bez wklejania całego pliku (1-2 MB).
+    """
+    path = Path(out_dir) / "account_check.html"
+    if not path.exists():
+        return None, []
+    html = path.read_text(encoding="utf-8", errors="replace")
+    low, target = html.lower(), needle.lower()
+    snippets, start = [], 0
+    while len(snippets) < limit:
+        at = low.find(target, start)
+        if at < 0:
+            break
+        chunk = html[max(0, at - window): at + len(needle) + window]
+        snippets.append(" ".join(chunk.split()))     # jedna linia
+        start = at + len(needle)
+    return path, snippets
 
 
 def check(headers_file, out_dir):
@@ -121,9 +149,24 @@ def check(headers_file, out_dir):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Sprawdza, czy wklejone nagłówki logują Cię na Vinted (bez proxy).")
     parser.add_argument("headers_file", nargs="?", help="plik z nagłówkami (domyślnie sniper/logs/my_headers.txt)")
+    parser.add_argument("--find", metavar="TEKST", help="przeszukaj zapisany account_check.html (np. swoją nazwę "
+                        "konta) i pokaż krótkie fragmenty - do dostrojenia wykrywania")
     args = parser.parse_args(argv)
 
     log_dir = Path(ScoutConfig().log_dir)
+    if args.find:
+        path, snippets = find_in_saved(log_dir, args.find)
+        if path is None:
+            print(f"Brak {log_dir / 'account_check.html'} - najpierw uruchom 'python -m sniper.account'.")
+            return 2
+        if not snippets:
+            print(f"Nie znalazłem '{args.find}' w {path}.")
+            return 1
+        print(f"Znalazłem '{args.find}' {len(snippets)}x w {path}:")
+        for i, snippet in enumerate(snippets, 1):
+            print(f"  {i}. ...{snippet}...")
+        print("\nWklej mi te fragmenty (zamaż token/hasło, gdyby się trafiło), dostroję wykrywanie nazwy.")
+        return 0
     headers_file = Path(args.headers_file) if args.headers_file else log_dir / DEFAULT_HEADERS_FILE
     if not headers_file.exists():
         print(f"Brak pliku z nagłówkami: {headers_file}")
