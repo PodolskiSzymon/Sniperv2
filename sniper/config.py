@@ -273,6 +273,27 @@ MODEL_PRICES = {
 
 
 @dataclass(frozen=True)
+class AccountConfig:
+    """Sesja TWOJEGO konta Vinted (auto-zakup) - osobny program sniper.account_session.
+
+    Idzie z domowego IP, NIGDY przez proxy IPRoyal (sesja konta i ciastka anty-botowe są związane z Twoim IP).
+    Logowanie: ciastka z pliku (SNIPER_ACCOUNT_HEADERS_FILE) wczytane do trwałego profilu Chromium;
+    stronę odświeża jej własny JS, więc token podtrzymuje się sam (refresh_token żyje ~7 dni).
+    """
+    enabled: bool = _env_bool("SNIPER_ACCOUNT_ENABLED", False)
+    headers_file: str = _env("SNIPER_ACCOUNT_HEADERS_FILE")   # domyślnie <log_dir>/my_headers.txt (ustalane niżej)
+    profile_dir: str = _env("SNIPER_ACCOUNT_PROFILE_DIR")     # domyślnie <log_dir>/account_profile
+    # Widoczne okno przeglądarki: przy pierwszym logowaniu / captchy wygodniej je widzieć (false).
+    headless: bool = _env_bool("SNIPER_ACCOUNT_HEADLESS", False)
+    # Co ile minut wejść na stronę, żeby podtrzymać sesję (JS Vinted odświeża wtedy token dostępu ~1 h).
+    keepalive_min: float = _env_float("SNIPER_ACCOUNT_KEEPALIVE_MIN", 20.0)
+    # Limit czasu jednej nawigacji (s).
+    nav_timeout: float = _env_float("SNIPER_ACCOUNT_NAV_TIMEOUT", 45.0)
+    # Ścieżka do chrome.exe - tylko gdy Playwright nie znajduje przeglądarki sam (puste = automatycznie).
+    chrome_path: str = _env("SNIPER_ACCOUNT_CHROME_PATH")
+
+
+@dataclass(frozen=True)
 class ScoutConfig:
     # Zbudowane z SNIPER_PROXY_HOST + SNIPER_PROXY_AUTH (albo SNIPER_PROXY_URL) - patrz build_proxy_url().
     proxy_url: str = field(default_factory=build_proxy_url)
@@ -314,6 +335,7 @@ class ScoutConfig:
 
     smtp: SmtpConfig = field(default_factory=SmtpConfig)
     ai: AiConfig = field(default_factory=AiConfig)
+    account: AccountConfig = field(default_factory=AccountConfig)
 
     @property
     def catalog_id(self):

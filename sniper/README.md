@@ -110,6 +110,16 @@ za ocenę. Claude Opus 5.5 przy tym samym wejściu ≈ 0,05–0,10 USD. Taniej: 
 `SNIPER_AI_MODEL=claude-sonnet-5-5` (~2× taniej) / `claude-haiku-4-5` (~4× taniej; wtedy `SNIPER_AI_EFFORT=`
 i `SNIPER_AI_FALLBACK=false`).
 
+**Krok 2 - sesja konta 24/7** (`python -m sniper.account_session`): osobny program, który trzyma Twoje konto
+zalogowane w trwałym profilu Chromium (z domowego IP, BEZ proxy). Co `SNIPER_ACCOUNT_KEEPALIVE_MIN` minut wchodzi
+na stronę - JS Vinted odświeża wtedy token dostępu (żyje ~1 h) refresh-tokenem (żyje ~7 dni), więc sesja nie
+wygasa. Sprawdza przez `api/v2/banners`, czy wciąż jesteś zalogowany. `open_item(url)` otwiera ofertę na koncie -
+fundament pod auto-zakup, ale NA RAZIE NIC NIE KUPUJE.
+
+Włącz `SNIPER_ACCOUNT_ENABLED=true`, miej `sniper/logs/my_headers.txt` (świeży cURL z F12). Po ~7 dniach,
+gdy refresh-token wygaśnie, wklej nowy cURL i uruchom ponownie. Pliki `my_headers.txt` i `account_profile/`
+są w `.gitignore`.
+
 ## Alerty e-mail
 
 Bez modułu AI każda złapana oferta idzie mailem (z AI – tylko okazje i nieocenione) przez Onet (`smtp.poczta.onet.pl:465`, SSL).
