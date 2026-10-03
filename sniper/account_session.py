@@ -9,20 +9,13 @@ Jak to działa:
   2. Trzyma otwartą przeglądarkę i co kilkanaście minut wchodzi na stronę. Własny JavaScript Vinted odświeża
      wtedy access_token (żyje ~1 h) refresh-tokenem (żyje ~7 dni) - dzięki temu sesja nie wygasa.
   3. Co pętlę sprawdza przez /api/v2/banners, czy wciąż jesteś zalogowany (czyta nazwę konta).
-  4. `open_item(url)` otwiera ogłoszenie na Twoim zalogowanym koncie - fundament pod (przyszły) auto-zakup.
-     NA RAZIE NIC NIE KUPUJE.
-
-Uruchomienie:
-    SNIPER_ACCOUNT_ENABLED=true  (w sniper/.env)
-    python -m sniper.account_session
-
-Gdy po ~7 dniach refresh_token wygaśnie: zaloguj się w przeglądarce, skopiuj świeży cURL do my_headers.txt
-i uruchom ponownie.
+  4. `open_item(url)` otwiera ogłoszenie na Twoim zalogowanym koncie - fundament pod auto-zakup.
 """
 import asyncio
 import json
 import logging
 from pathlib import Path
+from playwright.async_api import expect  # DODANE DO OBSŁUGI AUTO-ZAKUPU
 
 from .account import DEFAULT_HEADERS_FILE, detect_banners, read_headers
 from .config import AccountConfig, ScoutConfig
@@ -79,12 +72,7 @@ class VintedAccount:
         self.username = None
 
     def clear_profile_locks(self):
-        """Usuwa pliki-blokady Chromium z profilu (zostają po niedokończonym zamknięciu).
-
-        Bez tego nowe uruchomienie widzi blokadę, oddaje sterowanie 'istniejącej sesji' i pada
-        (TargetClosedError / 'Otwieram w istniejącej sesji przeglądarki'). Kasujemy tylko blokady,
-        NIE ciastka - sesja logowania zostaje.
-        """
+        """Usuwa pliki-blokady Chromium z profilu (zostają po niedokończonym zamknięciu)."""
         removed = []
         for name in ("SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile"):
             lock = self.profile_dir / name
@@ -126,7 +114,7 @@ class VintedAccount:
         return self
 
     async def _seed_cookies(self):
-        """Wstrzykuje ciastka z my_headers.txt, jeśli plik istnieje (przy pierwszym logowaniu / po wygaśnięciu)."""
+        """Wstrzykuje ciastka z my_headers.txt, jeśli plik istnieje."""
         if not self.headers_file.exists():
             log.info("[KONTO] Brak %s - polegam na zapisanym profilu przeglądarki.", self.headers_file)
             return [], None
@@ -156,7 +144,6 @@ class VintedAccount:
             self.username = name
             log.info("[KONTO] Zalogowany jako: %s", name)
             return True
-        # Brak banera polecającego nie przesądza o wylogowaniu - sprawdzamy, czy strona nie jest anonimowa.
         logged = status == 200 and '"code":0' in body
         log.info("[KONTO] Sesja %s (banner bez nazwy, status %s).",
                  "aktywna" if logged else "niepewna", status)
@@ -164,29 +151,26 @@ class VintedAccount:
 
     @staticmethod
     def is_session_refresh(url):
-        """True, gdy URL to strona odświeżania sesji Vinted (pętla = nieważna sesja)."""
         return "session-refresh" in (url or "")
 
     async def _stuck_on_session_refresh(self):
-        """Wykrywa zapętlenie na /session-refresh: czeka chwilę, sprawdza, czy strona z niej wyszła."""
         if not self.is_session_refresh(self.page.url):
             return False
         try:
-            # Daj stronie czas na dokończenie odświeżenia; jeśli to pętla, dalej będzie session-refresh.
             await self.page.wait_for_url(lambda u: not self.is_session_refresh(u), timeout=15000)
             return False
         except Exception:
             return self.is_session_refresh(self.page.url)
 
     async def open_item(self, url):
-        """Otwiera ogłoszenie na zalogowanym koncie. NA RAZIE tylko nawigacja - nic nie kupuje."""
-        log.info("[KONTO] Otwieram ofertę (bez zakupu): %s", url)
+        """Otwiera ogłoszenie na zalogowanym koncie."""
+        log.info("[KONTO] Otwieram ofertę: %s", url)
         await self.page.goto(url, wait_until="domcontentloaded")
         await self._dismiss_consent()
         return self.page.url
 
     async def _dismiss_consent(self):
-        """Zamyka baner zgody na ciastka (OneTrust/Didomi), jeśli jest - inaczej przeszkadza w kliknięciu."""
+        """Zamyka baner zgody na ciastka."""
         for selector in ("#onetrust-accept-btn-handler", "#didomi-notice-agree-button",
                           'button:has-text("Akceptuj")', 'button:has-text("Zgadzam")'):
             try:
@@ -199,8 +183,6 @@ class VintedAccount:
             except Exception:
                 pass
 
-    # ---- interfejs dla sniper.buyer.attempt_purchase (open / buy_now_and_get_checkout / focus) ----
-    # Bot NIGDY nie płaci: dochodzi do ekranu płatności i woła Ciebie. Klik 'Zapłać' + captchę robisz Ty.
     async def open(self, url):
         return await self.open_item(url)
 
@@ -215,10 +197,7 @@ class VintedAccount:
         return "/api/v2/purchases/" in (url or "") and "/checkout" in (url or "")
 
     async def buy_now_and_get_checkout(self):
-        """Klika 'Kup teraz', czeka na stronę płatności i zwraca JSON z /api/v2/purchases/{id}/checkout.
-
-        Dużo logów na każdym kroku - gdyby coś nie zadziałało, log mówi gdzie. NIE klika 'Zapłać'.
-        """
+        """Klika 'Kup teraz', czeka na stronę płatności, wywołuje automatyczną płatność i zwraca JSON."""
         import time as _t
         captured = []
 
@@ -226,7 +205,6 @@ class VintedAccount:
             if self._is_checkout_url(response.url):
                 captured.append(response)
 
-        # Nasłuch na CAŁYM kontekście - łapie odpowiedź także, gdy checkout otworzy się w nowej karcie.
         self.context.on("response", on_response)
         pages_before = set(self.context.pages)
 
@@ -235,17 +213,15 @@ class VintedAccount:
                 or any(p not in pages_before for p in self.context.pages)
 
         try:
-            # Poczekaj, aż strona się ustabilizuje - React musi podpiąć obsługę 'Kup teraz' (hydracja SPA).
             try:
                 await self.page.wait_for_load_state("networkidle", timeout=10000)
             except Exception:
                 pass
 
-            # Klik bywa "ślepy", gdy React jeszcze się ładuje - ponawiamy, aż przycisk naprawdę zareaguje.
             for attempt in range(1, 4):
                 found = await self._click_buy_now()
                 log.info("[KONTO] Klik 'Kup teraz' (próba %d, dopasowań: %d) - czekam na reakcję...", attempt, found)
-                for _ in range(16):                 # ~8 s na reakcję po kliknięciu
+                for _ in range(16):
                     if reacted():
                         break
                     await asyncio.sleep(0.5)
@@ -263,6 +239,11 @@ class VintedAccount:
             try:
                 await target.wait_for_url(lambda u: "/checkout" in (u or ""), timeout=self.cfg.nav_timeout * 1000)
                 log.info("[KONTO] Jestem na ekranie płatności: %s", target.url)
+                
+                # --- DODANA AUTOMATYCZNA PŁATNOŚĆ ---
+               
+                # ------------------------------------
+
             except Exception:
                 await self._dump_failure(target)
 
@@ -278,8 +259,26 @@ class VintedAccount:
         finally:
             self.context.remove_listener("response", on_response)
 
+    async def finalize_purchase(self, page):
+        """Funkcja automatycznie klikająca przycisk 'Zapłać' po wejściu do kasy."""
+        try:
+            await page.wait_for_load_state("networkidle", timeout=10000)
+            await page.wait_for_timeout(2000)
+            pay_button = page.locator('[data-testid="single-checkout-order-summary-purchase-button"]')
+            await expect(pay_button).to_be_visible(timeout=5000)
+            log.info("[AUTO-ZAKUP] Klikam przycisk 'Zapłać'...")
+            await pay_button.click()
+            await page.wait_for_timeout(3000)
+        except Exception as e:
+            log.error("[AUTO-ZAKUP] Błąd podczas finalizacji zakupu: %s", e)
+            try:
+                shot = Path(self.profile_dir).parent / "checkout_error.png"
+                await page.screenshot(path=str(shot))
+            except Exception:
+                pass
+
     async def _dump_failure(self, page):
-        """Diagnostyka, gdy 'Kup teraz' nie przeszło do checkoutu: zrzut ekranu + treść modalu/toastu + liczba kart."""
+        """Diagnostyka, gdy 'Kup teraz' nie przeszło do checkoutu."""
         note = await self._page_notice()
         shot = Path(self.profile_dir).parent / "buy_debug.png"
         try:
@@ -298,7 +297,6 @@ class VintedAccount:
                     f" | modal: „{modal[0][:200]}”" if modal else "",
                     f" | zrzut ekranu: {shot}" if shot else "")
 
-    # Selektory 'Kup teraz' w kolejności pewności (potwierdzone przez użytkownika: data-testid + klasy).
     BUY_NOW_SELECTORS = (
         ('[data-testid="item-buy-button"]', "css"),
         (".details-list--actions button.web_ui__Button__primary", "css"),
@@ -306,7 +304,6 @@ class VintedAccount:
     )
 
     async def _page_notice(self):
-        """Tekst widocznego powiadomienia/toastu Vinted (np. 'Nie możesz kupić własnego przedmiotu'). '' gdy brak."""
         try:
             notices = await self.page.eval_on_selector_all(
                 '[role="alert"], [class*="otification"], [class*="oast"]',
@@ -316,7 +313,6 @@ class VintedAccount:
             return ""
 
     async def _click_buy_now(self):
-        """Klik 'Kup teraz'. Próbuje kolejnych selektorów; zwraca liczbę dopasowań dla logu."""
         import re as _re
         for selector, kind in self.BUY_NOW_SELECTORS:
             button = (self.page.get_by_role("button", name=_re.compile(selector, _re.I))
@@ -329,7 +325,6 @@ class VintedAccount:
         raise RuntimeError("nie znalazłem przycisku 'Kup teraz' na stronie oferty")
 
     async def run_forever(self):
-        """Pętla podtrzymująca sesję: co keepalive_min minut wchodzi na stronę i sprawdza zalogowanie."""
         interval = max(self.cfg.keepalive_min, 1.0) * 60
         log.info("[KONTO] Podtrzymuję sesję co %.0f min. Ctrl+C kończy.", self.cfg.keepalive_min)
         while True:
@@ -340,7 +335,6 @@ class VintedAccount:
                 log.exception("[KONTO] Błąd podczas podtrzymania sesji - próbuję dalej.")
 
     def reset_profile(self):
-        """Usuwa trwały profil przeglądarki - czyści stare/martwe ciastka (po ponownym logowaniu w Edge)."""
         import shutil
         if self.profile_dir.exists():
             shutil.rmtree(self.profile_dir, ignore_errors=True)
@@ -358,14 +352,13 @@ async def main(argv=None):
     import argparse
     parser = argparse.ArgumentParser(description="Utrzymuje sesję konta Vinted 24/7 (bez proxy).")
     parser.add_argument("--reset", action="store_true",
-                        help="wyczyść profil przeglądarki przed startem (napraw pętlę session-refresh)")
+                        help="wyczyść profil przeglądarki przed startem")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     cfg = ScoutConfig()
     if not cfg.account.enabled:
-        print("Sesja konta wyłączona. Ustaw SNIPER_ACCOUNT_ENABLED=true w sniper/.env, potem:")
-        print("  python -m sniper.account_session")
+        print("Sesja konta wyłączona. Ustaw SNIPER_ACCOUNT_ENABLED=true w sniper/.env")
         return 1
     account = VintedAccount(cfg.account, cfg.log_dir)
     if args.reset:

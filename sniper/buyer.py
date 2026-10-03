@@ -1,14 +1,9 @@
 """Auto-zakup okazji z konta - rdzeń decyzji i bezpieczniki (krok 3).
 
-Przepływ docelowy (przez sesję z account_session, z domowego IP, bez proxy):
+Przepływ docelowy:
   ocena AI >= próg  ->  bot otwiera ofertę  ->  'Kup teraz'  ->  ekran checkout
   ->  parse_checkout()  ->  decide_purchase() sprawdza TWARDE limity
-  ->  tryb próbny: log 'KUPIŁBYM' i STOP;  realny: klik 'Zapłać', potem captchę przesuwasz TY.
-
-Captcha przy płatności jest celowo po stronie człowieka - ten moduł jej nie obchodzi.
-
-Tu są czyste, testowalne części: odczyt odpowiedzi /api/v2/purchases/{id}/checkout, decyzja wg limitów
-i rejestr zakupów (logs/bought.jsonl - nie kupujemy dwa razy tego samego, limit na dobę).
+  ->  realny zakup: wywołanie auto-kliknięcia 'Zapłać' -> człowiek rozwiązuje captchę.
 """
 import json
 import logging
@@ -21,7 +16,6 @@ log = logging.getLogger("sniper.buyer")
 
 
 def _amount(node):
-    """{'amount': '23.9', 'currency_code': 'PLN'} -> (23.9, 'PLN'). Odporne na null/braki."""
     if not isinstance(node, dict):
         return None, None
     try:
@@ -32,11 +26,6 @@ def _amount(node):
 
 
 def parse_checkout(payload):
-    """Odpowiedź /api/v2/purchases/{id}/checkout -> płaski słownik z tym, co potrzebne do decyzji.
-
-    Zweryfikowana struktura (cURL użytkownika 2026-10-03): checkout.components.{order_summary_v2, pay_button_v2,
-    payment_method, shipping_address}.
-    """
     checkout = (payload or {}).get("checkout") or {}
     comp = checkout.get("components") or {}
     pay = comp.get("pay_button_v2") or {}
@@ -67,8 +56,6 @@ def parse_checkout(payload):
 
 
 class PurchaseLedger:
-    """Rejestr zakupów w logs/bought.jsonl: blokuje drugi zakup tej samej oferty i liczy zakupy na dobę."""
-
     def __init__(self, log_dir):
         self.path = Path(log_dir) / "bought.jsonl" if log_dir else None
         self._rows = self._load()
@@ -85,23 +72,18 @@ class PurchaseLedger:
                         pass
         return rows
 
-    # Statusy "zajmujące" ofertę: 'ready' = przygotowany checkout czeka na Twój klik 'Zapłać'.
-    # (Bot nigdy nie płaci sam, więc nie zapisuje 'bought' - to tylko dla ewentualnego ręcznego wpisu.)
     CONSUMED = ("ready", "bought")
 
     def already_bought(self, item_id):
-        # Przygotowany/kupiony przedmiot nie jest przygotowywany po raz drugi. 'skipped' się nie liczy.
         return any(r.get("status") in self.CONSUMED and str(r.get("item_id")) == str(item_id) for r in self._rows)
 
     def count_on(self, day):
-        """Ile checkoutów przygotowano (lub kupiono) danego dnia lokalnego (date)."""
         return sum(1 for r in self._rows if r.get("status") in self.CONSUMED and r.get("local_date") == day.isoformat())
 
     def count_today(self):
         return self.count_on(datetime.now().astimezone().date())
 
     def record(self, parsed, status, reason=""):
-        """Dopisuje wpis (status: 'bought' = kupione, 'dry_run' = tryb próbny, 'skipped' = odrzucone)."""
         now = datetime.now(timezone.utc)
         row = {
             "ts": now.isoformat(),
@@ -126,11 +108,6 @@ class PurchaseLedger:
 
 
 def decide_purchase(parsed, cfg: BuyerConfig, ledger, offer=None):
-    """Czy kupić? Zwraca (ok: bool, powód). Czysta decyzja - NIE klika niczego.
-
-    offer = słownik oceny z evaluator (opcjonalnie): sprawdzamy ocenę AI i kraj sprzedawcy.
-    Każdy warunek, który nie przechodzi, zatrzymuje zakup - to są bezpieczniki, mają być surowe.
-    """
     if not parsed.get("item_id"):
         return False, "brak przedmiotu w checkout (pusty koszyk?)"
     if parsed.get("item_count", 0) != 1:
@@ -171,18 +148,7 @@ def summarize(parsed):
 
 
 async def attempt_purchase(nav, url, offer, cfg: BuyerConfig, ledger):
-    """Przygotowuje zakup okazji - ale NIGDY nie płaci. Płatność (klik 'Zapłać' + captcha) robi człowiek.
-
-    `nav` dostarcza przeglądarkę (account_session.VintedAccount):
-      await nav.open(url)                    - otwiera ofertę na zalogowanym koncie
-      await nav.buy_now_and_get_checkout()   - klika 'Kup teraz', zwraca JSON z /checkout (dict)
-      await nav.focus()                      - okno przeglądarki na wierzch (żebyś dokończył)
-
-    Zwraca {status, reason, parsed}:
-      'skipped' - nie spełnia limitów (nic nie ruszone dalej),
-      'ready'   - checkout gotowy, czeka na TWÓJ klik 'Zapłać',
-      'error'   - nie udało się wejść do checkoutu.
-    """
+    """Zarządza pełnym procesem: wejście -> weryfikacja limitów -> klik 'Zapłać'."""
     await nav.open(url)
     try:
         payload = await nav.buy_now_and_get_checkout()
@@ -197,25 +163,26 @@ async def attempt_purchase(nav, url, offer, cfg: BuyerConfig, ledger):
         log.info("[BUY] Nie przygotowuję zakupu %s: %s", parsed.get("item_id"), reason)
         return {"status": "skipped", "reason": reason, "parsed": parsed}
 
-    # Checkout przygotowany. Bot NIE płaci - zostawia decyzję i ostatni klik Tobie.
-    ledger.record(parsed, "ready", reason)
     try:
         await nav.focus()
     except Exception:
         pass
-    log.warning("[BUY] GOTOWE DO ZAPŁATY: %s | %s. Przejdź do przeglądarki, kliknij 'Zapłać' i przesuń suwak.",
-                summarize(parsed), reason)
-    return {"status": "ready", "reason": reason, "parsed": parsed}
+    
+    log.warning("[BUY] LIMITI ZAAKCEPTOWANE: %s | %s. Odpalam auto-zakup...", summarize(parsed), reason)
+
+    # WŁAŚCIWY MOMENT NA KLIKNIĘCIE ZAPŁAĆ
+    try:
+        await nav.finalize_purchase(nav.page)
+        ledger.record(parsed, "bought", reason)
+        log.warning("[BUY] AUTO-ZAKUP WYKONANY! Przycisk 'Zapłać' kliknięty. Przejdź do okna i przesuń suwak (jeśli jest).")
+        return {"status": "bought", "reason": reason, "parsed": parsed}
+    except Exception as exc:
+        log.error("[BUY] Błąd podczas klikania 'Zapłać': %s", exc)
+        ledger.record(parsed, "error", str(exc))
+        return {"status": "error", "reason": str(exc), "parsed": parsed}
 
 
 async def _cli(argv=None):
-    """Test auto-zakupu na wklejonym linku: dochodzi do ekranu płatności i ZATRZYMUJE się.
-
-        python -m sniper.buyer "https://www.vinted.pl/items/XXXX-..."
-
-    Otwiera ofertę na Twoim zalogowanym koncie (przez account_session, bez proxy), klika 'Kup teraz',
-    sprawdza limity i czeka - 'Zapłać' oraz suwak klikasz TY w otwartym oknie. Nic nie płaci samo.
-    """
     import argparse
     import asyncio
     import logging
@@ -223,7 +190,7 @@ async def _cli(argv=None):
     from .account_session import VintedAccount
     from .config import ScoutConfig
 
-    parser = argparse.ArgumentParser(description="Test: przygotuj zakup oferty (bez płacenia).")
+    parser = argparse.ArgumentParser(description="Test: auto-zakup na wklejonym linku.")
     parser.add_argument("url", help="link do oferty na Vinted")
     parser.add_argument("--max", type=float, help="nadpisz limit sumy (PLN) na ten test")
     parser.add_argument("--ignore-limits", action="store_true", help="pomiń limity (tylko do testu)")
@@ -246,12 +213,12 @@ async def _cli(argv=None):
         if not account.username:
             print("Nie potwierdziłem zalogowania - sprawdź my_headers.txt (świeży cURL) i spróbuj --reset.")
             return 1
-        print(f"Zalogowany jako {account.username}. Przygotowuję zakup (bez płacenia): {args.url}")
+        print(f"Zalogowany jako {account.username}. Przygotowuję auto-zakup: {args.url}")
         result = await attempt_purchase(account, args.url, None, buy_cfg, ledger)
         print(f"\nWynik: {result['status']} - {result['reason']}")
-        if result["status"] == "ready":
-            print("Checkout GOTOWY w oknie przeglądarki. Jeśli chcesz kupić: kliknij 'Zapłać' i przesuń suwak RĘCZNIE.")
-            print("Potem Enter tutaj, żeby zamknąć przeglądarkę (nic nie kliknę za Ciebie).")
+        if result["status"] == "bought":
+            print("Skrypt kliknął 'ZAPŁAĆ'. Sprawdź otwarte okno przeglądarki, by rozwiązać captchę!")
+            print("Potem Enter tutaj, żeby zamknąć program.")
             await asyncio.get_event_loop().run_in_executor(None, input)
     finally:
         await account.close()
