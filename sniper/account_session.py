@@ -182,11 +182,11 @@ class VintedAccount:
         return await response.json()
 
     async def _click_buy_now(self):
-        """Klik 'Kup teraz'. Kilka wariantów selektora - do potwierdzenia realnym ruchem (F12) u użytkownika."""
+        """Klik 'Kup teraz'. Selektor potwierdzony przez użytkownika (HTML z F12): data-testid="item-buy-button"."""
         import re as _re
-        button = self.page.get_by_role("button", name=_re.compile("kup teraz", _re.I))
-        if await button.count() == 0:
-            button = self.page.get_by_text(_re.compile(r"^\s*Kup teraz\s*$", _re.I))
+        button = self.page.get_by_test_id("item-buy-button")
+        if await button.count() == 0:                      # zapas, gdyby Vinted zmieniło testid
+            button = self.page.get_by_role("button", name=_re.compile("kup teraz", _re.I))
         await button.first.click(timeout=self.cfg.nav_timeout * 1000)
 
     async def run_forever(self):

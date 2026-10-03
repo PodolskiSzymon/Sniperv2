@@ -137,6 +137,13 @@ nie kupuje dwa razy tej samej (rejestr `logs/bought.jsonl`). **Bot NIGDY nie pł
 płatności i woła Ciebie - klik „Zapłać” i captchę (suwak) robisz Ty. To celowe: captcha to zabezpieczenie
 Vinted, którego nie obchodzimy. Włącznik `SNIPER_BUY_ENABLED` (domyślnie false).
 
+Test na wklejonym linku (bez płacenia - dochodzi do checkoutu i czeka na Twój klik „Zapłać”):
+
+```bash
+python -m sniper.buyer "https://www.vinted.pl/items/XXXX-..."       # limity z .env
+python -m sniper.buyer "https://www.vinted.pl/items/XXXX-..." --ignore-limits   # tylko do testu
+```
+
 ## Alerty e-mail
 
 Bez modułu AI każda złapana oferta idzie mailem (z AI – tylko okazje i nieocenione) przez Onet (`smtp.poczta.onet.pl:465`, SSL).
