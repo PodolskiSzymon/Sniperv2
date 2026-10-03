@@ -38,8 +38,9 @@ python -m pytest sniper/tests        # testy (bez sieci)
 | `traffic.py` | Licznik transferu przez proxy (katalog / detale / przeglądarka) → heartbeat + `logs/traffic.csv`. |
 | `diagnose.py` | Narzędzie diagnostyczne. |
 | `account.py` | Krok 1 do auto-zakupu: test logowania na konto (`api/v2/banners`, potem strona główna; z domowego IP, bez proxy). |
-| `account_session.py` | Krok 2: osobny program utrzymujący sesję konta 24/7 - trwały profil Chromium (bez proxy), podtrzymanie przez wejścia na stronę, `open_item()` (na razie bez zakupu). |
-| `tests/` | 85 testów (pytest; `test_evaluator.py` z atrapami API Gemini i Anthropic), `fixtures.json` = prawdziwe odpowiedzi API. |
+| `account_session.py` | Krok 2: osobny program utrzymujący sesję konta 24/7 - trwały profil Chromium (bez proxy), podtrzymanie przez wejścia na stronę; `open/buy_now_and_get_checkout/focus` dla buyera (klika „Kup teraz”, NIE „Zapłać”). |
+| `buyer.py` | Krok 3: rdzeń auto-zakupu - `parse_checkout()`, `decide_purchase()` (twarde limity: suma, sztuk/dobę, PL, ocena), rejestr `bought.jsonl`, `attempt_purchase()` przygotowuje checkout i woła Ciebie. Bot NIGDY nie płaci (captcha/„Zapłać” = człowiek). |
+| `tests/` | 103 testy (pytest; `test_evaluator.py` z atrapami API Gemini i Anthropic), `fixtures.json` = prawdziwe odpowiedzi API. |
 
 ## Ustalenia o API Vinted (zweryfikowane na żywo przez użytkownika)
 

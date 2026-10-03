@@ -120,6 +120,13 @@ Włącz `SNIPER_ACCOUNT_ENABLED=true`, miej `sniper/logs/my_headers.txt` (świe�
 gdy refresh-token wygaśnie, wklej nowy cURL i uruchom ponownie. Pliki `my_headers.txt` i `account_profile/`
 są w `.gitignore`.
 
+**Krok 3 - auto-zakup (`sniper/buyer.py`)**: przy ofercie z oceną >= `SNIPER_BUY_MIN_SCORE` bot przez sesję
+konta otwiera ofertę, klika „Kup teraz”, czyta checkout (`/api/v2/purchases/{id}/checkout`) i sprawdza twarde
+limity: suma <= `SNIPER_BUY_MAX_TOTAL`, max `SNIPER_BUY_MAX_PER_DAY` na dobę, tylko PL (`SNIPER_BUY_PL_ONLY`),
+nie kupuje dwa razy tej samej (rejestr `logs/bought.jsonl`). **Bot NIGDY nie płaci**: dochodzi do ekranu
+płatności i woła Ciebie - klik „Zapłać” i captchę (suwak) robisz Ty. To celowe: captcha to zabezpieczenie
+Vinted, którego nie obchodzimy. Włącznik `SNIPER_BUY_ENABLED` (domyślnie false).
+
 ## Alerty e-mail
 
 Bez modułu AI każda złapana oferta idzie mailem (z AI – tylko okazje i nieocenione) przez Onet (`smtp.poczta.onet.pl:465`, SSL).

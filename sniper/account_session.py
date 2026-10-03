@@ -84,15 +84,16 @@ class VintedAccount:
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         self._pw = await async_playwright().start()
         # Trwały profil => sesja przeżywa restart programu. BEZ proxy (proxy=None) - domowe IP.
-        launch_kwargs = dict(headless=self.cfg.headless, proxy=None, viewport={"width": 1280, "height": 900})
+        launch_kwargs = dict(headless=self.cfg.headless, proxy=None, viewport=self.cfg.viewport_size)
         if self.cfg.chrome_path:
             launch_kwargs["executable_path"] = self.cfg.chrome_path
         self.context = await self._pw.chromium.launch_persistent_context(str(self.profile_dir), **launch_kwargs)
         self.context.set_default_navigation_timeout(self.cfg.nav_timeout * 1000)
         _, user_agent = await self._seed_cookies()
         self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
-        log.info("[KONTO] Przeglądarka uruchomiona (profil: %s, headless=%s, bez proxy).",
-                 self.profile_dir, self.cfg.headless)
+        vp = self.cfg.viewport_size
+        log.info("[KONTO] Przeglądarka uruchomiona (profil: %s, headless=%s, okno %dx%d px, bez proxy).",
+                 self.profile_dir, self.cfg.headless, vp["width"], vp["height"])
         await self.refresh_and_check()
         return self
 
@@ -132,6 +133,39 @@ class VintedAccount:
         log.info("[KONTO] Otwieram ofertę (bez zakupu): %s", url)
         await self.page.goto(url, wait_until="domcontentloaded")
         return self.page.url
+
+    # ---- interfejs dla sniper.buyer.attempt_purchase (open / buy_now_and_get_checkout / focus) ----
+    # Bot NIGDY nie płaci: dochodzi do ekranu płatności i woła Ciebie. Klik 'Zapłać' + captchę robisz Ty.
+    async def open(self, url):
+        return await self.open_item(url)
+
+    async def focus(self):
+        try:
+            await self.page.bring_to_front()
+        except Exception:
+            pass
+
+    async def buy_now_and_get_checkout(self):
+        """Klika 'Kup teraz' i zwraca JSON z /api/v2/purchases/{id}/checkout (zweryfikowany endpoint).
+
+        Selektor przycisku 'Kup teraz' potwierdzimy na realnym teście u Ciebie - tu rozsądne podejście
+        (rola/tekst). NIE klika 'Zapłać'.
+        """
+        def is_checkout(response):
+            return "/api/v2/purchases/" in response.url and response.url.rstrip("/").endswith("/checkout")
+
+        async with self.page.expect_response(is_checkout, timeout=self.cfg.nav_timeout * 1000) as info:
+            await self._click_buy_now()
+        response = await info.value
+        return await response.json()
+
+    async def _click_buy_now(self):
+        """Klik 'Kup teraz'. Kilka wariantów selektora - do potwierdzenia realnym ruchem (F12) u użytkownika."""
+        import re as _re
+        button = self.page.get_by_role("button", name=_re.compile("kup teraz", _re.I))
+        if await button.count() == 0:
+            button = self.page.get_by_text(_re.compile(r"^\s*Kup teraz\s*$", _re.I))
+        await button.first.click(timeout=self.cfg.nav_timeout * 1000)
 
     async def run_forever(self):
         """Pętla podtrzymująca sesję: co keepalive_min minut wchodzi na stronę i sprawdza zalogowanie."""
