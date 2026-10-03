@@ -113,7 +113,7 @@ def test_ledger_blocks_duplicate_and_counts_daily(tmp_path):
     assert ledger.count_today() == 1
 
     ok, reason = decide_purchase(parsed, cfg(), ledger, offer())
-    assert ok is False and "już kupiona" in reason
+    assert ok is False and "już w rejestrze" in reason
 
 
 def test_ledger_daily_limit_blocks(tmp_path):
@@ -229,3 +229,16 @@ def test_cli_requires_url():
 async def attempt_cli_noargs():
     from sniper.buyer import _cli
     return await _cli([])
+
+
+def test_ledger_forget_removes_false_entry(tmp_path):
+    ledger = PurchaseLedger(tmp_path)
+    parsed = parse_checkout(CHECKOUT)
+    ledger.record(parsed, "bought")
+    ledger.record(parsed, "skipped", "x")
+    ok, reason = decide_purchase(parsed, cfg(), ledger)
+    assert not ok and "status 'bought'" in reason and "--forget" in reason
+    assert ledger.forget("10225109576") == 1
+    assert PurchaseLedger(tmp_path).already_bought("10225109576") is False      # zapisane na dysku
+    assert len(PurchaseLedger(tmp_path)._rows) == 1                            # 'skipped' zostaje
+    assert decide_purchase(parsed, cfg(), PurchaseLedger(tmp_path))[0] is True

@@ -141,6 +141,7 @@ Captchę / potwierdzenie banku dokańczasz Ty w otwartym oknie - program go nie 
 ```bash
 python -m sniper.buyer "https://www.vinted.pl/items/XXXX-..."       # limity z .env - PŁACI!
 python -m sniper.buyer "https://www.vinted.pl/items/XXXX-..." --max 30   # test na tanim przedmiocie
+python -m sniper.buyer "https://www.vinted.pl/items/XXXX-..." --forget   # usuń fałszywy wpis z bought.jsonl i spróbuj
 ```
 
 ## Alerty e-mail

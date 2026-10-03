@@ -76,8 +76,24 @@ class PurchaseLedger:
     # 'pay_unconfirmed' = klik 'Zapłać' bez potwierdzenia reakcji - mogło przejść, więc też blokuje ponowny zakup.
     CONSUMED = ("ready", "bought", "pay_unconfirmed")
 
+    def find(self, item_id):
+        """Ostatni wpis 'zajmujący' tę ofertę (albo None)."""
+        rows = [r for r in self._rows if r.get("status") in self.CONSUMED and str(r.get("item_id")) == str(item_id)]
+        return rows[-1] if rows else None
+
     def already_bought(self, item_id):
-        return any(r.get("status") in self.CONSUMED and str(r.get("item_id")) == str(item_id) for r in self._rows)
+        return self.find(item_id) is not None
+
+    def forget(self, item_id):
+        """Usuwa z rejestru wpisy 'zajmujące' tę ofertę (np. fałszywe 'bought'). Zwraca liczbę usuniętych."""
+        keep = [r for r in self._rows
+                if not (r.get("status") in self.CONSUMED and str(r.get("item_id")) == str(item_id))]
+        removed = len(self._rows) - len(keep)
+        if removed:
+            self._rows = keep
+            if self.path:
+                self.path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in keep), encoding="utf-8")
+        return removed
 
     def count_on(self, day):
         return sum(1 for r in self._rows if r.get("status") in self.CONSUMED and r.get("local_date") == day.isoformat())
@@ -123,8 +139,10 @@ def decide_purchase(parsed, cfg: BuyerConfig, ledger, offer=None):
         return False, f"waluta {parsed.get('currency')} != PLN"
     if total > cfg.max_total_pln:
         return False, f"suma {total:.2f} > limit {cfg.max_total_pln:.0f} zł (SNIPER_BUY_MAX_TOTAL)"
-    if ledger.already_bought(parsed["item_id"]):
-        return False, "ta oferta już kupiona (rejestr bought.jsonl)"
+    previous = ledger.find(parsed["item_id"])
+    if previous:
+        return False, (f"ta oferta jest już w rejestrze bought.jsonl (status '{previous.get('status')}' z "
+                       f"{(previous.get('ts') or '?')[:16]}) - jeśli to pomyłka, uruchom z --forget")
     done = ledger.count_today()
     if done >= cfg.max_per_day:
         return False, f"limit {cfg.max_per_day} zakupów na dobę osiągnięty ({done})"
@@ -197,6 +215,8 @@ async def _cli(argv=None):
     parser.add_argument("url", help="link do oferty na Vinted")
     parser.add_argument("--max", type=float, help="nadpisz limit sumy (PLN) na ten test")
     parser.add_argument("--ignore-limits", action="store_true", help="pomiń limity (tylko do testu)")
+    parser.add_argument("--forget", action="store_true",
+                        help="usuń tę ofertę z rejestru bought.jsonl (gdy wpis 'kupione' jest fałszywy)")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -210,6 +230,14 @@ async def _cli(argv=None):
         buy_cfg = replace(buy_cfg, max_total_pln=10**9, max_per_day=10**9, pl_only=False, min_score=0.0)
 
     ledger = PurchaseLedger(cfg.log_dir)
+    if args.forget:
+        import re
+        match = re.search(r"/items/(\d+)", args.url)
+        if not match:
+            print("--forget: nie odczytałem ID oferty z linku (oczekuję .../items/123456-...).")
+            return 1
+        removed = ledger.forget(match.group(1))
+        print(f"Usunąłem z rejestru bought.jsonl {removed} wpis(ów) oferty {match.group(1)}.")
     account = VintedAccount(cfg.account, cfg.log_dir)
     try:
         await account.start()
