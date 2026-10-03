@@ -107,3 +107,25 @@ def test_main_without_file_explains(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(account.ScoutConfig, "log_dir", str(tmp_path / "empty"))
     code = account.main([str(tmp_path / "nie_ma.txt")])
     assert code == 2 and "Brak pliku" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("html,fragment", [
+    (r'{\"login\":\"szymon_k\",\"id\":123456789}', "szymon_k"),         # ekranowane cudzysłowy (Next.js)
+    ('{&quot;username&quot;:&quot;flipper99&quot;}', "flipper99"),       # HTML-owe &quot;
+])
+def test_detect_login_handles_escaped_json(html, fragment):
+    logged, detail = account.detect_login(html)
+    assert logged is True and fragment in detail
+
+
+def test_find_in_saved_returns_snippets(tmp_path):
+    (tmp_path / "account_check.html").write_text(
+        'x' * 200 + 'blabla"login":"szymon_k","id":123' + 'y' * 200, encoding="utf-8")
+    path, snippets = account.find_in_saved(tmp_path, "szymon_k", window=20)
+    assert path is not None and len(snippets) == 1 and "szymon_k" in snippets[0]
+    assert len(snippets[0]) < 80                        # krótki fragment, nie cały plik
+    assert account.find_in_saved(tmp_path, "nie_ma_tego")[1] == []
+
+
+def test_find_in_saved_missing_file(tmp_path):
+    assert account.find_in_saved(tmp_path, "cokolwiek") == (None, [])
