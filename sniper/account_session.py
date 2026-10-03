@@ -300,8 +300,119 @@ class VintedAccount:
         raise RuntimeError(f"przycisk 'Zapłać' nie pojawił się / jest nieaktywny po {timeout:.0f} s "
                            f"(URL: {page.url})")
 
+    # Komunikaty walidacji formularza checkout (np. czerwone „Wybierz punkt odbioru” pod sekcją wysyłki).
+    _PROBLEM_SELECTORS = ('[role="alert"], [class*="Text__warning"], [class*="Text__error"], '
+                          '[class*="Text__danger"], [class*="Validation"], [class*="validation"]')
+    # Zapytania, które naprawdę oznaczają start płatności. Reszta POST-ów (analityka, zdarzenia) się nie liczy.
+    _PAYMENT_HINTS = ("purchase", "transaction", "payment", "checkout", "pay")
+    _TRACKING_HINTS = ("event", "track", "analytic", "metric", "log", "public", "collect", "telemetry")
+
+    async def _checkout_problems(self, page):
+        """Widoczne komunikaty błędów formularza checkout (lista tekstów)."""
+        try:
+            texts = await page.eval_on_selector_all(
+                self._PROBLEM_SELECTORS,
+                "els => els.filter(e => e.offsetParent !== null)"
+                "          .map(e => (e.innerText || '').trim()).filter(Boolean)")
+        except Exception:
+            texts = []
+        return list(dict.fromkeys(texts))
+
+    def _pickup_heading(self, page):
+        import re as _re
+        return page.locator("h2", has_text=_re.compile(r"^\s*Wybierz punkt odbioru\s*$", _re.I))
+
+    async def _pickup_missing(self, page):
+        heading = self._pickup_heading(page)
+        try:
+            return bool(await heading.count()) and await heading.first.is_visible()
+        except Exception:
+            return False
+
+    async def _ensure_pickup_point(self, page):
+        """Wysyłka do punktu bez wybranego punktu: klik „Wybierz punkt odbioru” -> „Potwierdź” (z ponawianiem).
+
+        Bez tego Vinted po kliku „Zapłać” tylko podświetla błąd „Wybierz punkt odbioru”.
+        """
+        import re as _re
+        import time as _t
+        if not await self._pickup_missing(page):
+            log.info("[AUTO-ZAKUP] Punkt odbioru wybrany (albo niepotrzebny) - pomijam wybór.")
+            return False
+        confirm = page.get_by_role("button", name=_re.compile(r"^\s*Potwierdź\s*$", _re.I))
+        for attempt in range(1, 4):
+            log.info("[AUTO-ZAKUP] Klikam 'Wybierz punkt odbioru' (próba %d)...", attempt)
+            await self._pickup_heading(page).first.click(timeout=10000)
+
+            # Okno z mapą/listą punktów doładowuje dane - czekamy na aktywny „Potwierdź”.
+            # Okno ma się pokazać w ~8 s (inaczej klik był ślepy); potem do 20 s na aktywny przycisk.
+            ready = False
+            started = _t.monotonic()
+            while _t.monotonic() - started < 20:
+                try:
+                    shown = bool(await confirm.count()) and await confirm.first.is_visible()
+                    if shown and await confirm.first.is_enabled():
+                        ready = True
+                        break
+                except Exception:
+                    shown = False
+                if not shown and _t.monotonic() - started > 8:
+                    break
+                await asyncio.sleep(0.5)
+            if not ready:
+                visible = False
+                try:
+                    visible = bool(await confirm.count()) and await confirm.first.is_visible()
+                except Exception:
+                    pass
+                if visible:
+                    shot = await self._screenshot(page, "pickup_error.png")
+                    raise RuntimeError("przycisk 'Potwierdź' w wyborze punktu odbioru jest nieaktywny - "
+                                       "prawdopodobnie trzeba najpierw zaznaczyć punkt na liście "
+                                       f"(wklej outerHTML punktu z F12){shot}")
+                log.warning("[AUTO-ZAKUP] Okno wyboru punktu się nie otworzyło (strona mogła się ładować) - ponawiam.")
+                await asyncio.sleep(1.5)
+                continue
+
+            try:
+                await page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+            log.info("[AUTO-ZAKUP] Klikam 'Potwierdź' (punkt odbioru)...")
+            await confirm.first.click(timeout=10000)
+
+            deadline = _t.monotonic() + 10
+            while _t.monotonic() < deadline:
+                if not await self._pickup_missing(page):
+                    log.info("[AUTO-ZAKUP] Punkt odbioru wybrany.")
+                    # Checkout przelicza się po zmianie dostawy - poczekaj, zanim klikniemy „Zapłać”.
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=10000)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(1.0)
+                    return True
+                await asyncio.sleep(0.5)
+            log.warning("[AUTO-ZAKUP] Po 'Potwierdź' punkt nadal niewybrany - ponawiam.")
+        shot = await self._screenshot(page, "pickup_error.png")
+        raise RuntimeError(f"nie udało się wybrać punktu odbioru po 3 próbach{shot}")
+
+    async def _screenshot(self, page, name):
+        shot = Path(self.profile_dir).parent / name
+        try:
+            await page.screenshot(path=str(shot), full_page=True)
+            return f" (zrzut ekranu: {shot})"
+        except Exception:
+            return ""
+
+    @classmethod
+    def _is_payment_request(cls, url):
+        path = url.split("?")[0].lower()
+        return any(h in path for h in cls._PAYMENT_HINTS) and not any(h in path for h in cls._TRACKING_HINTS)
+
     async def _pay_reacted(self, page, url_before, pages_before, frames_before, requests):
-        """Czy strona zareagowała na klik 'Zapłać'?"""
+        """Czy płatność ruszyła po kliku 'Zapłać'? Zwraca opis albo None."""
         if requests:
             return "zapytanie " + requests[-1]
         if page.url != url_before:
@@ -328,9 +439,10 @@ class VintedAccount:
     async def finalize_purchase(self, page=None):
         """Klika 'Zapłać' na ekranie checkout. Zwraca opis reakcji strony albo rzuca RuntimeError.
 
-        Wzorzec jak przy 'Kup teraz': czeka na pełne załadowanie (networkidle + aktywny przycisk), klika,
-        przez ~10 s sprawdza reakcję i ponawia klik (max 3 razy). Przeglądarki NIE zamyka - po kliknięciu
-        może pojawić się captcha / potwierdzenie banku, które dokańczasz w otwartym oknie.
+        Wzorzec jak przy 'Kup teraz': czeka na pełne załadowanie (networkidle + aktywny przycisk), w razie
+        potrzeby wybiera punkt odbioru, klika, przez ~10 s sprawdza reakcję i ponawia klik (max 3 razy).
+        Gdy Vinted pokaże błąd formularza, NIE uznaje zakupu - rzuca błąd z treścią komunikatu.
+        Przeglądarki NIE zamyka - captchę / potwierdzenie banku dokańczasz w otwartym oknie.
         """
         import time as _t
         page = page or self.page
@@ -344,13 +456,22 @@ class VintedAccount:
         except Exception:
             pass
         await self._wait_for_pay_button(page, self.cfg.nav_timeout)
+        await self._ensure_pickup_point(page)
 
-        requests = []
+        requests, other_posts = [], []
 
         def on_request(request):
-            # Każde zapytanie zmieniające stan (POST/PUT) do API Vinted po kliku = płatność ruszyła.
-            if request.method != "GET" and "/api/" in request.url and "vinted" in request.url:
-                requests.append(f"{request.method} {request.url.split('?')[0]}")
+            if request.method == "GET" or "vinted" not in request.url:
+                return
+            line = f"{request.method} {request.url.split('?')[0]}"
+            (requests if self._is_payment_request(request.url) else other_posts).append(line)
+
+        async def check_problems(before):
+            new = [t for t in await self._checkout_problems(page) if t not in before]
+            if new or await self._pickup_missing(page):
+                shot = await self._screenshot(page, "checkout_error.png")
+                msg = " | ".join(new) or "Wybierz punkt odbioru"
+                raise RuntimeError(f"Vinted nie przyjął płatności - komunikat na stronie: „{msg[:200]}”{shot}")
 
         self.context.on("request", on_request)
         try:
@@ -358,6 +479,7 @@ class VintedAccount:
                 url_before = page.url
                 pages_before = set(self.context.pages)
                 frames_before = len(page.frames)
+                problems_before = await self._checkout_problems(page)
                 button, selector = await self._find_pay_button(page)
                 if button is None:
                     reaction = await self._pay_reacted(page, url_before, pages_before, frames_before, requests)
@@ -369,24 +491,27 @@ class VintedAccount:
 
                 deadline = _t.monotonic() + 10
                 while _t.monotonic() < deadline:
+                    await asyncio.sleep(0.5)
+                    await check_problems(problems_before)
                     reaction = await self._pay_reacted(page, url_before, pages_before, frames_before, requests)
                     if reaction:
-                        log.info("[AUTO-ZAKUP] Strona zareagowała na 'Zapłać': %s", reaction)
+                        # Walidacja bywa chwilę po kliku - sprawdź jeszcze raz, zanim uznamy płatność.
+                        await asyncio.sleep(2.0)
+                        await check_problems(problems_before)
+                        log.info("[AUTO-ZAKUP] Płatność ruszyła po 'Zapłać': %s", reaction)
                         return reaction
-                    await asyncio.sleep(0.5)
+                if other_posts:
+                    log.info("[AUTO-ZAKUP] Inne zapytania po kliku (nie liczę jako płatność): %s",
+                             ", ".join(dict.fromkeys(other_posts)))
+                    other_posts.clear()
                 if attempt < 3:
                     log.warning("[AUTO-ZAKUP] Klik 'Zapłać' bez reakcji (strona mogła się jeszcze ładować) - ponawiam.")
                     await asyncio.sleep(1.5)
         finally:
             self.context.remove_listener("request", on_request)
 
-        shot = Path(self.profile_dir).parent / "checkout_error.png"
-        try:
-            await page.screenshot(path=str(shot), full_page=True)
-        except Exception:
-            shot = None
-        raise RuntimeError("klik 'Zapłać' 3 razy bez reakcji strony"
-                           + (f" (zrzut ekranu: {shot})" if shot else ""))
+        shot = await self._screenshot(page, "checkout_error.png")
+        raise RuntimeError(f"klik 'Zapłać' 3 razy bez reakcji strony{shot}")
 
     async def _dump_failure(self, page):
         """Diagnostyka, gdy 'Kup teraz' nie przeszło do checkoutu."""
