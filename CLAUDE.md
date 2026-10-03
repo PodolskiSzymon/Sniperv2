@@ -41,7 +41,7 @@ python -m pytest sniper/tests        # testy (bez sieci)
 | `account_session.py` | Krok 2: osobny program utrzymujący sesję konta 24/7 - trwały profil Chromium (bez proxy), podtrzymanie przez wejścia na stronę; `open/buy_now_and_get_checkout/focus/finalize_purchase` dla buyera; `finalize_purchase` czeka na załadowanie checkoutu (networkidle + aktywny przycisk `single-checkout-order-summary-purchase-button`), przy wysyłce do punktu bez wybranego punktu klika `h2` „Wybierz punkt odbioru” → „Potwierdź”, potem klika „Zapłać”, sprawdza reakcję (POST z purchase/transaction/payment/checkout w URL – analityka się nie liczy, zmiana URL, ramka captchy/3DS, przycisk zajęty/zniknął) i ponawia do 3 razy; czerwony komunikat walidacji = błąd, nie zakup. |
 | `buyer.py` | Krok 3: rdzeń auto-zakupu - `parse_checkout()`, `decide_purchase()` (twarde limity: suma, sztuk/dobę, PL, ocena), rejestr `bought.jsonl`, `attempt_purchase()` po zaakceptowaniu limitów klika „Zapłać” (status `bought`, albo `pay_unconfirmed` gdy brak reakcji – też blokuje ponowny zakup); captchę/potwierdzenie banku robi człowiek w otwartym oknie. CLI `python -m sniper.buyer <url>` nie zamyka przeglądarki do Entera. |
 | `KLIKANIE.md` | Instrukcja (dla nowego czatu): jak robić automatyczne klikanie w Vinted na podstawie outerHTML - stabilne selektory, czekanie na hydrację, ponawianie kliku. |
-| `tests/` | 108 testów (pytest; `test_evaluator.py` z atrapami API Gemini i Anthropic), `fixtures.json` = prawdziwe odpowiedzi API. |
+| `tests/` | 111 testów (pytest; `test_evaluator.py` z atrapami API Gemini i Anthropic), `fixtures.json` = prawdziwe odpowiedzi API. |
 
 ## Ustalenia o API Vinted (zweryfikowane na żywo przez użytkownika)
 
@@ -59,6 +59,11 @@ python -m pytest sniper/tests        # testy (bez sieci)
 * **ID ofert**: nadawane przy tworzeniu, nie publikacji – w „najnowszych” pojawiają się oferty z niższym ID
   (szkice, podbicia). Dlatego deduplikacja jest bez progu „niższe ID = stare”.
 * Ciastka `cf_clearance` / `datadome` są wiązane z UA → Playwright i httpx mają ten sam UA.
+* **Auto-zakup** (test na żywo 2026-10-03, „origami” za 3,95 zł – zakończony „Sprzedane”): „Kup teraz” →
+  `www.vinted.pl/checkout?purchase_id=…&order_id=…&order_type=transaction` (dane: `GET /api/v2/purchases/{id}/checkout`)
+  → klik „Zapłać” (`[data-testid="single-checkout-order-summary-purchase-button"]`) → **`POST /api/v2/purchases/{id}/checkout/payment`**
+  = płatność ruszyła; przy zapisanej karcie nie było captchy ani 3DS. W tym teście punkt odbioru był już wybrany –
+  ścieżka „Wybierz punkt odbioru” → „Potwierdź” jest sprawdzona tylko na atrapie.
 
 ## Proxy i transfer
 
