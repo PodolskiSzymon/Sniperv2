@@ -119,3 +119,14 @@ def test_stuck_on_session_refresh_when_not_refresh(tmp_path):
     account.page = FakePage({"status": 200, "body": "{}"})
     account.page.goto_urls.append("https://www.vinted.pl/")      # nie jest to session-refresh
     assert asyncio.run(account._stuck_on_session_refresh()) is False
+
+
+def test_clear_profile_locks_removes_only_locks(tmp_path):
+    account = acc.VintedAccount(AccountConfig(), tmp_path)
+    account.profile_dir.mkdir(parents=True)
+    for name in ("SingletonLock", "lockfile", "Cookies"):
+        (account.profile_dir / name).write_text("x", encoding="utf-8")
+    account.clear_profile_locks()
+    assert not (account.profile_dir / "SingletonLock").exists()
+    assert not (account.profile_dir / "lockfile").exists()
+    assert (account.profile_dir / "Cookies").exists()      # ciastka (logowanie) zostają

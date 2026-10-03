@@ -78,16 +78,44 @@ class VintedAccount:
         self.page = None
         self.username = None
 
+    def clear_profile_locks(self):
+        """Usuwa pliki-blokady Chromium z profilu (zostają po niedokończonym zamknięciu).
+
+        Bez tego nowe uruchomienie widzi blokadę, oddaje sterowanie 'istniejącej sesji' i pada
+        (TargetClosedError / 'Otwieram w istniejącej sesji przeglądarki'). Kasujemy tylko blokady,
+        NIE ciastka - sesja logowania zostaje.
+        """
+        removed = []
+        for name in ("SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile"):
+            lock = self.profile_dir / name
+            try:
+                if lock.is_symlink() or lock.exists():
+                    lock.unlink()
+                    removed.append(name)
+            except OSError:
+                pass
+        if removed:
+            log.info("[KONTO] Usunąłem blokady profilu: %s", ", ".join(removed))
+
     async def start(self):
         from playwright.async_api import async_playwright
 
         self.profile_dir.mkdir(parents=True, exist_ok=True)
+        self.clear_profile_locks()
         self._pw = await async_playwright().start()
         # Trwały profil => sesja przeżywa restart programu. BEZ proxy (proxy=None) - domowe IP.
         launch_kwargs = dict(headless=self.cfg.headless, proxy=None, viewport=self.cfg.viewport_size)
         if self.cfg.chrome_path:
             launch_kwargs["executable_path"] = self.cfg.chrome_path
-        self.context = await self._pw.chromium.launch_persistent_context(str(self.profile_dir), **launch_kwargs)
+        try:
+            self.context = await self._pw.chromium.launch_persistent_context(str(self.profile_dir), **launch_kwargs)
+        except Exception as exc:
+            raise RuntimeError(
+                "Nie udało się otworzyć przeglądarki na profilu konta. Najczęściej profil jest JUŻ UŻYWANY "
+                "przez inne okno/proces. Zamknij wszystkie okna tej przeglądarki i procesy 'python -m sniper...' "
+                "(w Menedżerze zadań), potem spróbuj ponownie. Jeśli nie pomoże: 'python -m sniper.account_session "
+                f"--reset' (wyczyści profil - trzeba będzie wkleić świeży cURL). Szczegół: {exc}"
+            ) from exc
         self.context.set_default_navigation_timeout(self.cfg.nav_timeout * 1000)
         _, user_agent = await self._seed_cookies()
         self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
