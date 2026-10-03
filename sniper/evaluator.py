@@ -702,14 +702,31 @@ class OfferEvaluator:
 
 
 # ---------------------------------------------------------------------------- test z linii poleceń
+def sample_laptop_offer():
+    """Zmyślona oferta laptopa (bez zdjęć i bez prawdziwego linku) - test klucza API, gdy brak offers.jsonl."""
+    from .extractor import Offer, Seller, Shipping
+
+    return Offer(
+        id=0, url="https://www.vinted.pl/ (oferta testowa - nie istnieje)",
+        title="[TEST] Lenovo Legion 5 RTX 4060 16GB RAM 1TB",
+        price=1800.0, currency="PLN",
+        description="Oferta testowa Snipera (nie istnieje). Laptop sprawny, bateria 90%, ładowarka w zestawie, "
+                    "drobne rysy na klapie.",
+        photo_urls=[],
+        seller=Seller(id=None, name="test", country="Polska", country_code="PL", feedback_count=25,
+                      feedback_reputation=1.0, stars=5.0, business=False),
+        shipping=Shipping(price=15.0, currency="PLN", free_shipping=False, pickup_only=False, multiple_options=True),
+        total_price=1815.0, brand="Lenovo", condition="Bardzo dobry",
+    )
+
+
 def _load_offers(log_dir, last):
     from .extractor import Offer
-    from .notifier import sample_offer
 
     path = Path(log_dir) / "offers.jsonl"
     if not path.exists():
-        print(f"Brak {path} - oceniam przykładową ofertę.")
-        return [sample_offer()]
+        print(f"Brak {path} (Zwiadowca jeszcze nic nie złapał) - oceniam zmyśloną ofertę testową laptopa.")
+        return [sample_laptop_offer()]
     lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     return [Offer.from_dict(json.loads(line)) for line in lines[-last:]]
 
@@ -738,6 +755,7 @@ async def _cli(argv=None):
         async def one(offer):
             reason = None if args.no_filter else prefilter(offer, cfg.ai)
             if reason:
+                evaluator._count("filtered")
                 return evaluator._record(offer, STATUS_FILTERED, prefilter_reason=reason)
             return await evaluator.evaluate(offer)
 

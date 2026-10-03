@@ -600,3 +600,10 @@ def test_provider_and_key_from_env(monkeypatch):
     finally:
         monkeypatch.undo()
         importlib.reload(config)
+
+
+def test_cli_sample_offer_passes_prefilter(tmp_path):
+    from sniper.evaluator import sample_laptop_offer
+    offer = sample_laptop_offer()
+    assert prefilter(offer, gemini_cfg(tmp_path, keywords=AiConfig().keywords)) is None
+    assert offer.photo_urls == [] and "vinted.pl/items" not in offer.url
