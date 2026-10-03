@@ -59,10 +59,12 @@ def _to_float(value):
 
 
 class Scout:
-    def __init__(self, cfg: ScoutConfig, session: VintedSession, notifier: EmailNotifier):
+    def __init__(self, cfg: ScoutConfig, session: VintedSession, notifier: EmailNotifier, evaluator=None):
         self.cfg = cfg
         self.session = session
         self.notifier = notifier
+        # OfferEvaluator (sniper/evaluator.py) albo None = mail o każdej ofercie, jak przed modułem AI.
+        self.evaluator = evaluator
         floor = min_dedup(cfg.per_page)
         if cfg.dedup_size < floor:
             log.warning("[SCOUT] SNIPER_DEDUP_SIZE=%d to za mało przy stronie %d ofert - używam %d.",
@@ -165,7 +167,10 @@ class Scout:
         if self.offers.full():
             self.offers.get_nowait()  # nikt jeszcze nie konsumuje - wyrzucamy najstarszą
         self.offers.put_nowait(payload)
-        self.notifier.notify(offer)
+        if self.evaluator:
+            self.evaluator.submit(offer)   # ocena AI w tle; mail wysyła evaluator po ocenie
+        else:
+            self.notifier.notify(offer)
 
     def _save_traffic(self, row):
         """Wiersz do <log_dir>/traffic.csv - do porównania ustawień per_page / tempa skanów."""
@@ -258,6 +263,8 @@ class Scout:
             for it in self._top_items:
                 log.info("    %s | %s | %s | %s", it.get("id"), it.get("title", "?"), _catalog_price(it),
                          item_url(it.get("id"), it))
+        if self.evaluator:
+            log.info("[SCOUT] %s", self.evaluator.window_report())
         text, row = self.session.traffic.window_report()
         log.info("[SCOUT] %s", text)
         self._save_traffic(row)

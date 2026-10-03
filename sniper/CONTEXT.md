@@ -1,8 +1,8 @@
 # Vinted Sniper – kontekst projektu (dla nowej rozmowy z Claude)
 
 Stan na 2026-10-02. MVP działa na komputerze użytkownika (Windows, Python 3.12, folder `F:\WEBSCRAPER`):
-wykrywa nowo dodane oferty w kategorii Vinted, sprawdza je i wysyła alert e-mail. Następny etap: ocena
-ofert przez model AI na podstawie wytycznych użytkownika.
+wykrywa nowo dodane oferty w kategorii Vinted, sprawdza je, ocenia modelem AI (Gemini lub Claude) wg wytycznych
+użytkownika (`sniper/guidelines.md`) i wysyła mail o okazjach. Moduł AI dodany 2026-10-03 (użytkownik wybrał Gemini z Google AI Studio) – czeka na test u użytkownika.
 
 Rozmawiamy po polsku. Claude **nie ma dostępu do vinted.pl ze swojego środowiska** (sandbox blokuje
 domenę) – wszystko, co dotyka prawdziwego Vinted, uruchamia użytkownik u siebie i wkleja log
@@ -17,6 +17,7 @@ playwright install chromium
 cp sniper/.env.example sniper/.env   # proxy IPRoyal, SMTP Onet, filtry
 python -m sniper                     # Zwiadowca
 python -m sniper.notifier            # mail testowy
+python -m sniper.evaluator --last 5  # ocena AI ostatnich ofert z logs/offers.jsonl (płatne wywołania)
 python -m sniper.diagnose            # to samo zapytanie przez przeglądarkę / httpx / requests
 python -m pytest sniper/tests        # testy (bez sieci)
 ```
@@ -28,13 +29,15 @@ python -m pytest sniper/tests        # testy (bez sieci)
 | `config.py` | Wszystko z `sniper/.env`; `build_proxy_url()` (wzorzec IPRoyal `http://{auth}@{host}`), `get_catalog_params()`, nagłówki `CATALOG_HEADERS` / `BASE_HEADERS`, `ScoutConfig`, `SmtpConfig`. |
 | `session.py` | `VintedSession`: `httpx.AsyncClient` za proxy; `get_json()` przy 401/403 wstrzymuje ruch i odświeża sesję Playwrightem (headless, przez `ProxyRelay`); próby z limitem czasu; lekki tryb przeglądarki; zapis/odczyt sesji z `logs/session.json`. |
 | `proxy_relay.py` | Lokalny przekaźnik proxy dla Chromium (Chromium nie wysyła loginu/hasła proxy przy HTTPS → `ERR_PROXY_AUTH_UNSUPPORTED`). Dokleja `Proxy-Authorization`, liczy bajty, rozpoznaje 407. |
-| `scout.py` | Pętla: skan katalogu → nowe ID → równolegle sidebar + shipping → odrzuć sprzedane/zarezerwowane/spoza ceny → `emit()` (log, `offers.jsonl`, kolejka `scout.offers` dla AI, mail). Heartbeat co 60 s. |
+| `scout.py` | Pętla: skan katalogu → nowe ID → równolegle sidebar + shipping → odrzuć sprzedane/zarezerwowane/spoza ceny → `emit()` (log, `offers.jsonl`, kolejka `scout.offers`, `evaluator.submit()` albo mail gdy AI wyłączone). Heartbeat co 60 s. |
 | `extractor.py` | Czyste parsowanie JSON → `Offer` (tytuł, cena, opis, `photo_urls` = `full_size_url`, sprzedawca, wysyłka, suma). |
-| `notifier.py` | Mail tekst + HTML przez `aiosmtplib` (Onet `smtp.poczta.onet.pl:465`, SSL), wysyłany w tle. |
+| `evaluator.py` | `OfferEvaluator`: filtr wstępny (cena, słowa) → backend `GeminiBackend` (`google-genai`, `client.aio.models.generate_content`, zdjęcia `file_uri` = URL albo pobrane bajty, `response_json_schema`, `thinking_level`) lub `AnthropicBackend` (`beta.messages.create`, `output_config.format`, `fallbacks`) – oba bez proxy → `logs/evaluations.jsonl` + `.csv` → mail gdy `score >= SNIPER_AI_MIN_SCORE` albo błąd AI („nieoceniona”). Semafor, timeout, ponowienia; heartbeat z tokenami i kosztem. |
+| `guidelines.md` | Wytyczne użytkownika (progi cen kart RTX), wczytywane ponownie po zmianie. |
+| `notifier.py` | Mail tekst + HTML przez `aiosmtplib` (Onet `smtp.poczta.onet.pl:465`, SSL), wysyłany w tle; sekcja „Ocena AI” i werdykt w temacie. |
 | `dedup.py` | `RecentIds`: `deque(maxlen)` + `set`. |
 | `traffic.py` | Licznik transferu przez proxy (katalog / detale / przeglądarka) → heartbeat + `logs/traffic.csv`. |
 | `diagnose.py` | Narzędzie diagnostyczne. |
-| `tests/` | 24 testy (pytest), `fixtures.json` = prawdziwe odpowiedzi API. |
+| `tests/` | 52 testy (pytest; `test_evaluator.py` z atrapami API Gemini i Anthropic), `fixtures.json` = prawdziwe odpowiedzi API. |
 
 ## Ustalenia o API Vinted (zweryfikowane na żywo przez użytkownika)
 
@@ -69,15 +72,22 @@ python -m pytest sniper/tests        # testy (bez sieci)
 
 `SNIPER_PROXY_HOST`, `SNIPER_PROXY_AUTH`, `SNIPER_CATALOG` (np. 3580 = laptopy), `SNIPER_PRICE_FROM`,
 `SNIPER_PRICE_TO`, `SNIPER_PER_PAGE`, `SNIPER_POLL_INTERVAL`, `SNIPER_SMTP_USER`, `SNIPER_SMTP_PASSWORD`,
-`SNIPER_EMAIL_TO`, `SNIPER_REFRESH_*`, `SNIPER_BROWSER_LIGHT`, `SNIPER_SESSION_MAX_AGE`, `SNIPER_HEARTBEAT`.
-Pełna lista: `sniper/.env.example`. `.env` i `sniper/logs/` (logi, `session.json` z tokenami) są w `.gitignore`.
+`SNIPER_EMAIL_TO`, `SNIPER_REFRESH_*`, `SNIPER_BROWSER_LIGHT`, `SNIPER_SESSION_MAX_AGE`, `SNIPER_HEARTBEAT`,
+`SNIPER_AI_*` (klucz, model, effort, próg `SNIPER_AI_MIN_SCORE`, `SNIPER_AI_NOTIFY_ALL`, filtr wstępny, limity).
+Pełna lista: `sniper/.env.example`. `.env` i `sniper/logs/` (logi, `session.json` z tokenami, `evaluations.*`) są w `.gitignore`.
 
-## Następny krok: ocena AI
+## Ocena AI (zrobione, do weryfikacji u użytkownika)
 
-* Wejście: słownik z `Offer.to_dict()` (już trafia do `scout.offers` i `logs/offers.jsonl`) + wytyczne
-  użytkownika. Zdjęcia przekazywać jako URL-e (`photo_urls`) – model pobiera je sam, więc obrazy nie idą
-  przez proxy ani łącze użytkownika.
-* Wywołanie API modelu i tak idzie bezpośrednio z komputera (nie przez proxy) – nie kosztuje transferu IPRoyal.
+* Dostawca `SNIPER_AI_PROVIDER=gemini` (model `gemini-3.8-flash`) albo `anthropic` (`claude-opus-5-5`);
+  klucz w `SNIPER_AI_API_KEY` (lub `GEMINI_API_KEY` / `ANTHROPIC_API_KEY`) – tylko w `.env` użytkownika, nigdy w repo.
+  Zdjęcia jako URL-e (`photo_urls`, max `SNIPER_AI_MAX_PHOTOS`) – pobiera je dostawca AI; Gemini ma znane
+  problemy z URL-ami (429) → wtedy `SNIPER_AI_PHOTOS=download` (pobieranie z domowego IP, bez proxy).
+* Wywołanie API idzie bezpośrednio z komputera (nie przez proxy) – nie kosztuje transferu IPRoyal.
+* Do sprawdzenia u użytkownika: czy Gemini pobiera obrazy `images1.vinted.net` (przy 400 ocena idzie bez zdjęć –
+  widać to w `photos_sent: 0` w `evaluations.jsonl`), trafność ocen na historii (`python -m sniper.evaluator --last 20`).
+
+## Pomysły na oszczędności transferu
+
 * Pomysł użytkownika: pobierać szczegóły oferty z domowego IP zamiast przez proxy. Uwaga: ciastka
   anty-botowe zdobyte przez proxy mogą nie działać z innego IP → potrzebna osobna „domowa” sesja
   (osobna wizyta Playwrighta bez proxy). Szczegóły to ~15 KB/ofertę, więc oszczędność jest mała w porównaniu
