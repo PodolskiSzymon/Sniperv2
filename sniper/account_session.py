@@ -204,40 +204,64 @@ class VintedAccount:
 
         Dużo logów na każdym kroku - gdyby coś nie zadziałało, log mówi gdzie. NIE klika 'Zapłać'.
         """
+        import time as _t
         captured = []
 
         def on_response(response):
             if self._is_checkout_url(response.url):
                 captured.append(response)
 
-        self.page.on("response", on_response)
+        # Nasłuch na CAŁYM kontekście - łapie odpowiedź także, gdy checkout otworzy się w nowej karcie.
+        self.context.on("response", on_response)
+        pages_before = set(self.context.pages)
         try:
             found = await self._click_buy_now()
             log.info("[KONTO] Kliknąłem 'Kup teraz' (dopasowań przycisku: %d). Czekam na ekran płatności...", found)
+            await asyncio.sleep(1.5)
+
+            new_pages = [p for p in self.context.pages if p not in pages_before]
+            target = new_pages[0] if new_pages else self.page
+            if new_pages:
+                log.info("[KONTO] Zakup otworzył się w NOWEJ karcie: %s", target.url)
+                self.page = target
 
             try:
-                await self.page.wait_for_url(lambda u: "/checkout" in (u or ""), timeout=self.cfg.nav_timeout * 1000)
-                log.info("[KONTO] Jestem na ekranie płatności: %s", self.page.url)
+                await target.wait_for_url(lambda u: "/checkout" in (u or ""), timeout=self.cfg.nav_timeout * 1000)
+                log.info("[KONTO] Jestem na ekranie płatności: %s", target.url)
             except Exception:
-                note = await self._page_notice()
-                log.warning("[KONTO] Nie przeszło na /checkout (URL: %s).%s "
-                            "Najczęstsza przyczyna: to Twoja WŁASNA oferta - Vinted nie pozwala kupić "
-                            "własnego przedmiotu. Wystaw przedmiot z DRUGIEGO konta, a zaloguj bota na koncie "
-                            "kupującym.", self.page.url, f" Komunikat Vinted: „{note}”." if note else "")
+                await self._dump_failure(target)
 
-            # Odpowiedź API /checkout może przyjść chwilę po nawigacji - dajemy jej do 20 s.
-            import time as _t
             deadline = _t.monotonic() + 20
             while not captured and _t.monotonic() < deadline:
                 await asyncio.sleep(0.5)
             if not captured:
-                raise RuntimeError(f"nie złapałem odpowiedzi /checkout (URL strony: {self.page.url})")
+                raise RuntimeError(f"nie złapałem odpowiedzi /checkout (URL strony: {target.url})")
 
             response = captured[-1]
             log.info("[KONTO] Mam dane checkout: HTTP %s", response.status)
             return await response.json()
         finally:
-            self.page.remove_listener("response", on_response)
+            self.context.remove_listener("response", on_response)
+
+    async def _dump_failure(self, page):
+        """Diagnostyka, gdy 'Kup teraz' nie przeszło do checkoutu: zrzut ekranu + treść modalu/toastu + liczba kart."""
+        note = await self._page_notice()
+        shot = Path(self.profile_dir).parent / "buy_debug.png"
+        try:
+            await page.screenshot(path=str(shot), full_page=True)
+        except Exception:
+            shot = None
+        try:
+            modal = await page.eval_on_selector_all(
+                '[role="dialog"], [class*="odal"], [class*="rawer"], [class*="heet"]',
+                "els => els.map(e => (e.innerText || '').trim()).filter(Boolean)")
+        except Exception:
+            modal = []
+        log.warning("[KONTO] 'Kup teraz' nie przeszło do checkoutu. URL: %s | kart otwartych: %d%s%s%s",
+                    page.url, len(self.context.pages),
+                    f" | toast: „{note}”" if note else "",
+                    f" | modal: „{modal[0][:200]}”" if modal else "",
+                    f" | zrzut ekranu: {shot}" if shot else "")
 
     # Selektory 'Kup teraz' w kolejności pewności (potwierdzone przez użytkownika: data-testid + klasy).
     BUY_NOW_SELECTORS = (
