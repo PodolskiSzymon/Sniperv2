@@ -511,6 +511,8 @@ class OfferEvaluator:
         self.backend = make_backend(cfg, client)
         self.client = self.backend.client
         self.guidelines = Guidelines(cfg.guidelines_file)
+        # AutoBuyer (sniper/autobuy.py) albo None. Okazję do kupienia przejmuje on i sam wysyła mail z wynikiem.
+        self.buyer = None
         self._slots = asyncio.Semaphore(max(cfg.max_concurrent, 1))
         self._tasks = set()
         self.window = _Stats()
@@ -563,6 +565,15 @@ class OfferEvaluator:
         return record["status"] == STATUS_EVALUATED and record["evaluation"]["score"] >= self.cfg.min_score
 
     def _finish(self, offer, record):
+        if self.buyer is not None and self.buyer.wants(record):
+            # Zakup najpierw, mail dopiero z jego wynikiem (jeden mail: „KUPIONE…” albo „NIE KUPIONO…”).
+            record["notified"] = bool(self.notifier)
+            record["auto_buy"] = True
+            self.save(record)
+            if record["notified"]:
+                self._count("notified")
+            self.buyer.submit(offer, record)
+            return
         record["notified"] = bool(self.notifier) and self.should_notify(record)
         self.save(record)
         if record["notified"]:

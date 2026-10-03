@@ -70,6 +70,24 @@ def build_evaluator(cfg, notifier):
     return evaluator
 
 
+async def build_buyer(cfg, notifier, evaluator):
+    """AutoBuyer (zalogowana przeglądarka konta) albo None. Wymaga oceny AI - bez niej nie wiemy, co jest okazją."""
+    log = logging.getLogger("sniper")
+    if not cfg.buyer.enabled:
+        log.info("[AUTO-BUY] Auto-zakup wyłączony (SNIPER_BUY_ENABLED=false) - okazje tylko mailem.")
+        return None
+    if evaluator is None:
+        log.warning("[AUTO-BUY] SNIPER_BUY_ENABLED=true, ale ocena AI nie działa - auto-zakup WYŁĄCZONY.")
+        return None
+    from .autobuy import AutoBuyer
+    buyer = AutoBuyer(cfg, notifier)
+    if not await buyer.start():
+        await buyer.shutdown()
+        return None
+    evaluator.buyer = buyer
+    return buyer
+
+
 async def main():
     asyncio.get_running_loop().set_exception_handler(_quiet_connection_resets)
     cfg = ScoutConfig()
@@ -93,14 +111,17 @@ async def main():
     )
     notifier = EmailNotifier(cfg.smtp)
     evaluator = build_evaluator(cfg, notifier)
-    scout = Scout(cfg, session, notifier, evaluator)
+    buyer = await build_buyer(cfg, notifier, evaluator)
+    scout = Scout(cfg, session, notifier, evaluator, buyer)
     try:
         await scout.run()
     finally:
         await scout.shutdown()
         if evaluator:
-            await evaluator.drain()      # oceny w locie -> ich maile trafiają do notifier
+            await evaluator.drain()      # oceny w locie -> ich maile trafiają do notifier (albo do buyera)
             await evaluator.close()
+        if buyer:
+            await buyer.shutdown()       # dokończ zakup w toku, zamknij przeglądarkę konta
         await notifier.drain()
         await session.close()
 
