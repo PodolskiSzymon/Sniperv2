@@ -3,7 +3,8 @@
 Przepływ docelowy:
   ocena AI >= próg  ->  bot otwiera ofertę  ->  'Kup teraz'  ->  ekran checkout
   ->  parse_checkout()  ->  decide_purchase() sprawdza TWARDE limity
-  ->  realny zakup: wywołanie auto-kliknięcia 'Zapłać' -> człowiek rozwiązuje captchę.
+  ->  klik 'Zapłać' (czeka na załadowanie checkoutu, ponawia) -> captchę / potwierdzenie banku robi człowiek
+      w otwartym oknie przeglądarki (program jej nie zamyka).
 """
 import json
 import logging
@@ -72,7 +73,8 @@ class PurchaseLedger:
                         pass
         return rows
 
-    CONSUMED = ("ready", "bought")
+    # 'pay_unconfirmed' = klik 'Zapłać' bez potwierdzenia reakcji - mogło przejść, więc też blokuje ponowny zakup.
+    CONSUMED = ("ready", "bought", "pay_unconfirmed")
 
     def already_bought(self, item_id):
         return any(r.get("status") in self.CONSUMED and str(r.get("item_id")) == str(item_id) for r in self._rows)
@@ -167,19 +169,20 @@ async def attempt_purchase(nav, url, offer, cfg: BuyerConfig, ledger):
         await nav.focus()
     except Exception:
         pass
-    
-    log.warning("[BUY] LIMITI ZAAKCEPTOWANE: %s | %s. Odpalam auto-zakup...", summarize(parsed), reason)
 
-    # WŁAŚCIWY MOMENT NA KLIKNIĘCIE ZAPŁAĆ
+    log.warning("[BUY] LIMITY ZAAKCEPTOWANE: %s | %s. Klikam 'Zapłać'...", summarize(parsed), reason)
     try:
-        await nav.finalize_purchase(nav.page)
-        ledger.record(parsed, "bought", reason)
-        log.warning("[BUY] AUTO-ZAKUP WYKONANY! Przycisk 'Zapłać' kliknięty. Przejdź do okna i przesuń suwak (jeśli jest).")
-        return {"status": "bought", "reason": reason, "parsed": parsed}
+        reaction = await nav.finalize_purchase(nav.page)
     except Exception as exc:
-        log.error("[BUY] Błąd podczas klikania 'Zapłać': %s", exc)
-        ledger.record(parsed, "error", str(exc))
-        return {"status": "error", "reason": str(exc), "parsed": parsed}
+        # Nie wiemy na pewno, czy płatność nie ruszyła - 'pay_unconfirmed' blokuje ponowny zakup tej oferty.
+        log.error("[BUY] 'Zapłać' nie potwierdzone: %s. Sprawdź okno przeglądarki.", exc)
+        ledger.record(parsed, "pay_unconfirmed", str(exc))
+        return {"status": "pay_unconfirmed", "reason": str(exc), "parsed": parsed}
+
+    ledger.record(parsed, "bought", reason)
+    log.warning("[BUY] 'Zapłać' kliknięte (%s). Dokończ w otwartym oknie przeglądarki (suwak / potwierdzenie banku).",
+                reaction)
+    return {"status": "bought", "reason": reason, "parsed": parsed}
 
 
 async def _cli(argv=None):
@@ -214,12 +217,17 @@ async def _cli(argv=None):
             print("Nie potwierdziłem zalogowania - sprawdź my_headers.txt (świeży cURL) i spróbuj --reset.")
             return 1
         print(f"Zalogowany jako {account.username}. Przygotowuję auto-zakup: {args.url}")
-        result = await attempt_purchase(account, args.url, None, buy_cfg, ledger)
+        try:
+            result = await attempt_purchase(account, args.url, None, buy_cfg, ledger)
+        except Exception as exc:
+            log.exception("[BUY] Nieoczekiwany błąd auto-zakupu")
+            result = {"status": "error", "reason": str(exc)}
         print(f"\nWynik: {result['status']} - {result['reason']}")
         if result["status"] == "bought":
-            print("Skrypt kliknął 'ZAPŁAĆ'. Sprawdź otwarte okno przeglądarki, by rozwiązać captchę!")
-            print("Potem Enter tutaj, żeby zamknąć program.")
-            await asyncio.get_event_loop().run_in_executor(None, input)
+            print("Skrypt kliknął 'ZAPŁAĆ'. Dokończ w otwartym oknie przeglądarki (suwak / potwierdzenie banku).")
+        # Okno zostaje otwarte niezależnie od wyniku - zamknięcie przerwałoby płatność / captchę w toku.
+        print("Przeglądarka zostaje otwarta. Enter tutaj zamyka program (dopiero po zakończeniu płatności!).")
+        await asyncio.get_running_loop().run_in_executor(None, input)
     finally:
         await account.close()
     return 0

@@ -133,7 +133,15 @@ zawsze zostają po Twojej stronie.
 **Krok 3 - auto-zakup (`sniper/buyer.py`)**: przy ofercie z oceną >= `SNIPER_BUY_MIN_SCORE` bot przez sesję
 konta otwiera ofertę, klika „Kup teraz”, czyta checkout (`/api/v2/purchases/{id}/checkout`) i sprawdza twarde
 limity: suma <= `SNIPER_BUY_MAX_TOTAL`, max `SNIPER_BUY_MAX_PER_DAY` na dobę, tylko PL (`SNIPER_BUY_PL_ONLY`),
-trzeba dodać mechanizm płacenia automatycznego (regulamin na to zezwala).
+nie kupuje dwa razy tej samej (rejestr `logs/bought.jsonl`). Gdy limity przechodzą, bot czeka na pełne
+załadowanie ekranu płatności (jak przy „Kup teraz”: networkidle + aktywny przycisk), klika „Zapłać”, sprawdza
+reakcję strony i w razie ślepego kliku ponawia (max 3 razy; zrzut `logs/checkout_error.png` przy porażce).
+Captchę / potwierdzenie banku dokańczasz Ty w otwartym oknie - program go nie zamyka.
+
+```bash
+python -m sniper.buyer "https://www.vinted.pl/items/XXXX-..."       # limity z .env - PŁACI!
+python -m sniper.buyer "https://www.vinted.pl/items/XXXX-..." --max 30   # test na tanim przedmiocie
+```
 
 ## Alerty e-mail
 

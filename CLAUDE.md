@@ -38,8 +38,8 @@ python -m pytest sniper/tests        # testy (bez sieci)
 | `traffic.py` | Licznik transferu przez proxy (katalog / detale / przeglądarka) → heartbeat + `logs/traffic.csv`. |
 | `diagnose.py` | Narzędzie diagnostyczne. |
 | `account.py` | Krok 1 do auto-zakupu: test logowania na konto (`api/v2/banners`, potem strona główna; z domowego IP, bez proxy). |
-| `account_session.py` | Krok 2: osobny program utrzymujący sesję konta 24/7 - trwały profil Chromium (bez proxy), podtrzymanie przez wejścia na stronę; `open/buy_now_and_get_checkout/focus` dla buyera (klika „Kup teraz”, NIE „Zapłać”). |
-| `buyer.py` | Krok 3: rdzeń auto-zakupu - `parse_checkout()`, `decide_purchase()` (twarde limity: suma, sztuk/dobę, PL, ocena), rejestr `bought.jsonl`, `attempt_purchase()` przygotowuje checkout i woła Ciebie; CLI `python -m sniper.buyer <url>`. Bot NIGDY nie płaci (klik „Zapłać” = człowiek). |
+| `account_session.py` | Krok 2: osobny program utrzymujący sesję konta 24/7 - trwały profil Chromium (bez proxy), podtrzymanie przez wejścia na stronę; `open/buy_now_and_get_checkout/focus/finalize_purchase` dla buyera; `finalize_purchase` czeka na załadowanie checkoutu (networkidle + aktywny przycisk `single-checkout-order-summary-purchase-button`), klika „Zapłać”, sprawdza reakcję (POST do API, zmiana URL, ramka captchy/3DS, przycisk zajęty/zniknął) i ponawia do 3 razy. |
+| `buyer.py` | Krok 3: rdzeń auto-zakupu - `parse_checkout()`, `decide_purchase()` (twarde limity: suma, sztuk/dobę, PL, ocena), rejestr `bought.jsonl`, `attempt_purchase()` po zaakceptowaniu limitów klika „Zapłać” (status `bought`, albo `pay_unconfirmed` gdy brak reakcji – też blokuje ponowny zakup); captchę/potwierdzenie banku robi człowiek w otwartym oknie. CLI `python -m sniper.buyer <url>` nie zamyka przeglądarki do Entera. |
 | `KLIKANIE.md` | Instrukcja (dla nowego czatu): jak robić automatyczne klikanie w Vinted na podstawie outerHTML - stabilne selektory, czekanie na hydrację, ponawianie kliku. |
 | `tests/` | 108 testów (pytest; `test_evaluator.py` z atrapami API Gemini i Anthropic), `fixtures.json` = prawdziwe odpowiedzi API. |
 

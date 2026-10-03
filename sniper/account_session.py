@@ -15,7 +15,6 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from playwright.async_api import expect  # DODANE DO OBSŁUGI AUTO-ZAKUPU
 
 from .account import DEFAULT_HEADERS_FILE, detect_banners, read_headers
 from .config import AccountConfig, ScoutConfig
@@ -197,7 +196,7 @@ class VintedAccount:
         return "/api/v2/purchases/" in (url or "") and "/checkout" in (url or "")
 
     async def buy_now_and_get_checkout(self):
-        """Klika 'Kup teraz', czeka na stronę płatności, wywołuje automatyczną płatność i zwraca JSON."""
+        """Klika 'Kup teraz', czeka na stronę płatności i zwraca JSON z /checkout ('Zapłać' = finalize_purchase)."""
         import time as _t
         captured = []
 
@@ -239,11 +238,6 @@ class VintedAccount:
             try:
                 await target.wait_for_url(lambda u: "/checkout" in (u or ""), timeout=self.cfg.nav_timeout * 1000)
                 log.info("[KONTO] Jestem na ekranie płatności: %s", target.url)
-                
-                # --- DODANA AUTOMATYCZNA PŁATNOŚĆ ---
-               
-                # ------------------------------------
-
             except Exception:
                 await self._dump_failure(target)
 
@@ -259,23 +253,140 @@ class VintedAccount:
         finally:
             self.context.remove_listener("response", on_response)
 
-    async def finalize_purchase(self, page):
-        """Funkcja automatycznie klikająca przycisk 'Zapłać' po wejściu do kasy."""
+    PAY_SELECTORS = (
+        ('[data-testid="single-checkout-order-summary-purchase-button"]', "css"),
+        ("zapłać", "role"),
+    )
+
+    async def _find_pay_button(self, page):
+        import re as _re
+        for selector, kind in self.PAY_SELECTORS:
+            button = (page.get_by_role("button", name=_re.compile(selector, _re.I))
+                      if kind == "role" else page.locator(selector))
+            if await button.count():
+                return button.first, selector
+        return None, None
+
+    async def _wait_for_pay_button(self, page, timeout):
+        """Czeka, aż checkout się załaduje: przycisk 'Zapłać' widoczny, aktywny i strona po hydracji."""
+        import time as _t
         try:
-            await page.wait_for_load_state("networkidle", timeout=10000)
-            await page.wait_for_timeout(2000)
-            pay_button = page.locator('[data-testid="single-checkout-order-summary-purchase-button"]')
-            await expect(pay_button).to_be_visible(timeout=5000)
-            log.info("[AUTO-ZAKUP] Klikam przycisk 'Zapłać'...")
-            await pay_button.click()
-            await page.wait_for_timeout(3000)
-        except Exception as e:
-            log.error("[AUTO-ZAKUP] Błąd podczas finalizacji zakupu: %s", e)
-            try:
-                shot = Path(self.profile_dir).parent / "checkout_error.png"
-                await page.screenshot(path=str(shot))
-            except Exception:
-                pass
+            await page.wait_for_load_state("domcontentloaded", timeout=timeout * 1000)
+        except Exception:
+            pass
+        try:
+            await page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
+        await self._dismiss_consent()
+
+        deadline = _t.monotonic() + timeout
+        while _t.monotonic() < deadline:
+            button, selector = await self._find_pay_button(page)
+            if button is not None:
+                try:
+                    if await button.is_visible() and await button.is_enabled():
+                        log.info("[AUTO-ZAKUP] Przycisk 'Zapłać' gotowy (selektor: %s).", selector)
+                        # Chwila na podpięcie obsługi kliknięcia przez React (hydracja) - jak przy 'Kup teraz'.
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=5000)
+                        except Exception:
+                            pass
+                        await asyncio.sleep(1.0)
+                        return button
+                except Exception:
+                    pass
+            await asyncio.sleep(0.5)
+        raise RuntimeError(f"przycisk 'Zapłać' nie pojawił się / jest nieaktywny po {timeout:.0f} s "
+                           f"(URL: {page.url})")
+
+    async def _pay_reacted(self, page, url_before, pages_before, frames_before, requests):
+        """Czy strona zareagowała na klik 'Zapłać'?"""
+        if requests:
+            return "zapytanie " + requests[-1]
+        if page.url != url_before:
+            return f"zmiana URL -> {page.url}"
+        if any(p not in pages_before for p in self.context.pages):
+            return "nowa karta"
+        if len(page.frames) > frames_before:
+            return "nowa ramka (captcha / 3-D Secure)"
+        button, _ = await self._find_pay_button(page)
+        if button is None:
+            return "przycisk 'Zapłać' zniknął"
+        try:
+            if not await button.is_enabled() or await button.get_attribute("aria-busy") == "true":
+                return "przycisk 'Zapłać' w trakcie przetwarzania"
+        except Exception:
+            pass
+        try:
+            if await page.locator('[role="dialog"]:visible').count():
+                return "okno dialogowe (captcha / potwierdzenie)"
+        except Exception:
+            pass
+        return None
+
+    async def finalize_purchase(self, page=None):
+        """Klika 'Zapłać' na ekranie checkout. Zwraca opis reakcji strony albo rzuca RuntimeError.
+
+        Wzorzec jak przy 'Kup teraz': czeka na pełne załadowanie (networkidle + aktywny przycisk), klika,
+        przez ~10 s sprawdza reakcję i ponawia klik (max 3 razy). Przeglądarki NIE zamyka - po kliknięciu
+        może pojawić się captcha / potwierdzenie banku, które dokańczasz w otwartym oknie.
+        """
+        import time as _t
+        page = page or self.page
+        try:
+            await page.wait_for_url(lambda u: "/checkout" in (u or ""), timeout=self.cfg.nav_timeout * 1000)
+        except Exception:
+            pass
+        log.info("[AUTO-ZAKUP] Czekam na załadowanie ekranu płatności: %s", page.url)
+        try:
+            await page.bring_to_front()
+        except Exception:
+            pass
+        await self._wait_for_pay_button(page, self.cfg.nav_timeout)
+
+        requests = []
+
+        def on_request(request):
+            # Każde zapytanie zmieniające stan (POST/PUT) do API Vinted po kliku = płatność ruszyła.
+            if request.method != "GET" and "/api/" in request.url and "vinted" in request.url:
+                requests.append(f"{request.method} {request.url.split('?')[0]}")
+
+        self.context.on("request", on_request)
+        try:
+            for attempt in range(1, 4):
+                url_before = page.url
+                pages_before = set(self.context.pages)
+                frames_before = len(page.frames)
+                button, selector = await self._find_pay_button(page)
+                if button is None:
+                    reaction = await self._pay_reacted(page, url_before, pages_before, frames_before, requests)
+                    if reaction:
+                        return reaction
+                    raise RuntimeError("nie znalazłem przycisku 'Zapłać' na ekranie checkout")
+                log.info("[AUTO-ZAKUP] Klikam 'Zapłać' (próba %d, selektor: %s)...", attempt, selector)
+                await button.click(timeout=10000)
+
+                deadline = _t.monotonic() + 10
+                while _t.monotonic() < deadline:
+                    reaction = await self._pay_reacted(page, url_before, pages_before, frames_before, requests)
+                    if reaction:
+                        log.info("[AUTO-ZAKUP] Strona zareagowała na 'Zapłać': %s", reaction)
+                        return reaction
+                    await asyncio.sleep(0.5)
+                if attempt < 3:
+                    log.warning("[AUTO-ZAKUP] Klik 'Zapłać' bez reakcji (strona mogła się jeszcze ładować) - ponawiam.")
+                    await asyncio.sleep(1.5)
+        finally:
+            self.context.remove_listener("request", on_request)
+
+        shot = Path(self.profile_dir).parent / "checkout_error.png"
+        try:
+            await page.screenshot(path=str(shot), full_page=True)
+        except Exception:
+            shot = None
+        raise RuntimeError("klik 'Zapłać' 3 razy bez reakcji strony"
+                           + (f" (zrzut ekranu: {shot})" if shot else ""))
 
     async def _dump_failure(self, page):
         """Diagnostyka, gdy 'Kup teraz' nie przeszło do checkoutu."""
