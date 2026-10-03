@@ -75,6 +75,8 @@ async def build_buyer(cfg, notifier, evaluator):
     log = logging.getLogger("sniper")
     if not cfg.buyer.enabled:
         log.info("[AUTO-BUY] Auto-zakup wyłączony (SNIPER_BUY_ENABLED=false) - okazje tylko mailem.")
+        if cfg.ai.mail_only_purchases:
+            log.warning("[MAIL] SNIPER_MAIL_ONLY_PURCHASES=true nie działa bez auto-zakupu - maile jak zwykle.")
         return None
     if evaluator is None:
         log.warning("[AUTO-BUY] SNIPER_BUY_ENABLED=true, ale ocena AI nie działa - auto-zakup WYŁĄCZONY.")
@@ -85,6 +87,8 @@ async def build_buyer(cfg, notifier, evaluator):
         await buyer.shutdown()
         return None
     evaluator.buyer = buyer
+    if cfg.ai.mail_only_purchases:
+        log.info("[MAIL] SNIPER_MAIL_ONLY_PURCHASES=true - maile tylko o kupionych / próbowanych okazjach.")
     return buyer
 
 

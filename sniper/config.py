@@ -235,6 +235,9 @@ class AiConfig:
     # Mail tylko gdy ocena >= min_score; notify_all=true -> mail o każdej ofercie (z oceną albo bez).
     min_score: float = _env_float("SNIPER_AI_MIN_SCORE", 7.0)
     notify_all: bool = _env_bool("SNIPER_AI_NOTIFY_ALL", False)
+    # true = mail TYLKO o okazjach, które auto-zakup kupił / próbował kupić (zwykłe oferty i błędy AI bez maila).
+    # Działa tylko przy włączonym auto-zakupie - bez niego maile idą jak zwykle, żeby nie zgubić okazji.
+    mail_only_purchases: bool = _env_bool("SNIPER_MAIL_ONLY_PURCHASES", False)
 
     # Asynchronicznie: limit równoległych wywołań, limit czasu jednej próby, liczba ponowień.
     max_concurrent: int = _env_int("SNIPER_AI_MAX_CONCURRENT", 3)

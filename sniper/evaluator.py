@@ -560,6 +560,9 @@ class OfferEvaluator:
         self._finish(offer, record)
 
     def should_notify(self, record):
+        # Tylko maile z auto-zakupu (ten wysyła buyer) - ale wyłącznie gdy buyer naprawdę działa.
+        if getattr(self.cfg, "mail_only_purchases", False) and self.buyer is not None:
+            return False
         if self.cfg.notify_all or record["status"] == STATUS_FAILED:
             return True
         return record["status"] == STATUS_EVALUATED and record["evaluation"]["score"] >= self.cfg.min_score

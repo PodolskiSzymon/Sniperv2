@@ -169,3 +169,34 @@ def test_purchase_mail_subject_and_body():
     skipped = {"status": "skipped", "reason": "limit 2 zakupów na dobę", "parsed": None}
     msg = build_message(offer, "a@b", "c@d", purchase=skipped)
     assert "NIE KUPIONO" in msg["Subject"] and "limit 2 zakupów" in msg.get_body(("plain",)).get_content()
+
+
+def _bare_evaluator(mail_only_purchases, buyer):
+    ev = object.__new__(OfferEvaluator)
+    ev.cfg = SimpleNamespace(notify_all=False, min_score=6.0, mail_only_purchases=mail_only_purchases)
+    ev.notifier = FakeNotifier()
+    ev.window, ev.total = {"notified": 0}, {"notified": 0}
+    ev.save = lambda record: None
+    ev.buyer = buyer
+    return ev
+
+
+def test_mail_only_purchases_silences_ordinary_offers(tmp_path):
+    submitted = []
+    ev_of = lambda r: r.get("evaluation") or {}  # noqa: E731
+    buyer = SimpleNamespace(wants=lambda r: bool(ev_of(r).get("is_deal")) and ev_of(r).get("score", 0) >= 8,
+                            submit=lambda offer, record: submitted.append(offer.id))
+    ev = _bare_evaluator(True, buyer)
+    offer = make_offer()
+    ev._finish(offer, record_for(offer, score=7, is_deal=False))      # zwykła oferta >= SNIPER_AI_MIN_SCORE
+    ev._finish(offer, {"status": "nieoceniona", "evaluation": None})    # błąd AI
+    assert ev.notifier.mails == []
+    ev._finish(offer, record_for(offer, score=9))                      # okazja -> buyer (on wyśle mail)
+    assert submitted == [offer.id]
+
+
+def test_mail_only_purchases_ignored_without_buyer(tmp_path):
+    ev = _bare_evaluator(True, None)                                    # auto-zakup nie działa
+    offer = make_offer()
+    ev._finish(offer, record_for(offer, score=7, is_deal=False))
+    assert len(ev.notifier.mails) == 1                                  # nie gubimy okazji

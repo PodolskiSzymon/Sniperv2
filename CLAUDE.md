@@ -42,7 +42,7 @@ python -m pytest sniper/tests        # testy (bez sieci)
 | `buyer.py` | Krok 3: rdzeń auto-zakupu - `parse_checkout()`, `decide_purchase()` (twarde limity: suma, sztuk/dobę, PL, ocena), rejestr `bought.jsonl`, `attempt_purchase()` po zaakceptowaniu limitów klika „Zapłać” (status `bought`, albo `pay_unconfirmed` gdy brak reakcji – też blokuje ponowny zakup); captchę/potwierdzenie banku robi człowiek w otwartym oknie. CLI `python -m sniper.buyer <url>` nie zamyka przeglądarki do Entera. |
 | `autobuy.py` | Krok 4: `AutoBuyer` w Zwiadowcy (`SNIPER_BUY_ENABLED=true`, wymaga oceny AI i zalogowanego konta): evaluator przekazuje okazję (`is_deal` i `score >= SNIPER_BUY_MIN_SCORE`) zamiast zwykłego maila → kolejka (jeden zakup naraz, `asyncio.Lock` dzieli przeglądarkę z podtrzymaniem sesji) → szybki precheck (rejestr, limit/dobę, cena z wysyłką) → `attempt_purchase()` (limit 240 s, po nim `pay_unconfirmed`) → od razu mail „KUPIONE – sprawdź / anuluj” / „NIEPOTWIERDZONE” / „NIE KUPIONO (powód)”. Przeglądarka konta startuje ze Zwiadowcą – nie uruchamiać wtedy osobno `sniper.account_session` (ten sam profil). |
 | `KLIKANIE.md` | Instrukcja (dla nowego czatu): jak robić automatyczne klikanie w Vinted na podstawie outerHTML - stabilne selektory, czekanie na hydrację, ponawianie kliku. |
-| `tests/` | 119 testów (pytest; `test_evaluator.py` z atrapami API Gemini i Anthropic), `fixtures.json` = prawdziwe odpowiedzi API. |
+| `tests/` | 121 testów (pytest; `test_evaluator.py` z atrapami API Gemini i Anthropic), `fixtures.json` = prawdziwe odpowiedzi API. |
 
 ## Ustalenia o API Vinted (zweryfikowane na żywo przez użytkownika)
 
@@ -83,7 +83,7 @@ python -m pytest sniper/tests        # testy (bez sieci)
 `SNIPER_PROXY_HOST`, `SNIPER_PROXY_AUTH`, `SNIPER_CATALOG` (np. 3580 = laptopy), `SNIPER_PRICE_FROM`,
 `SNIPER_PRICE_TO`, `SNIPER_PER_PAGE`, `SNIPER_POLL_INTERVAL`, `SNIPER_SMTP_USER`, `SNIPER_SMTP_PASSWORD`,
 `SNIPER_EMAIL_TO`, `SNIPER_REFRESH_*`, `SNIPER_BROWSER_LIGHT`, `SNIPER_SESSION_MAX_AGE`, `SNIPER_HEARTBEAT`,
-`SNIPER_AI_*` (klucz, model, effort, próg `SNIPER_AI_MIN_SCORE`, `SNIPER_AI_NOTIFY_ALL`, filtr wstępny, limity).
+`SNIPER_AI_*` (klucz, model, effort, próg `SNIPER_AI_MIN_SCORE`, `SNIPER_AI_NOTIFY_ALL`, filtr wstępny, limity), `SNIPER_BUY_*`, `SNIPER_MAIL_ONLY_PURCHASES` (true = maile tylko z auto-zakupu; działa tylko gdy auto-zakup wystartował).
 Pełna lista: `sniper/.env.example`. `.env` i `sniper/logs/` (logi, `session.json` z tokenami, `evaluations.*`) są w `.gitignore`.
 
 ## Ocena AI (zrobione, do weryfikacji u użytkownika)
