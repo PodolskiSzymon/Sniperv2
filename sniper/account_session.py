@@ -219,9 +219,11 @@ class VintedAccount:
                 await self.page.wait_for_url(lambda u: "/checkout" in (u or ""), timeout=self.cfg.nav_timeout * 1000)
                 log.info("[KONTO] Jestem na ekranie płatności: %s", self.page.url)
             except Exception:
-                log.warning("[KONTO] Nie przeszło na /checkout (aktualny URL: %s). "
-                            "Może przycisk wymaga innego kroku albo to Twoja własna oferta (nie da się kupić).",
-                            self.page.url)
+                note = await self._page_notice()
+                log.warning("[KONTO] Nie przeszło na /checkout (URL: %s).%s "
+                            "Najczęstsza przyczyna: to Twoja WŁASNA oferta - Vinted nie pozwala kupić "
+                            "własnego przedmiotu. Wystaw przedmiot z DRUGIEGO konta, a zaloguj bota na koncie "
+                            "kupującym.", self.page.url, f" Komunikat Vinted: „{note}”." if note else "")
 
             # Odpowiedź API /checkout może przyjść chwilę po nawigacji - dajemy jej do 20 s.
             import time as _t
@@ -243,6 +245,16 @@ class VintedAccount:
         (".details-list--actions button.web_ui__Button__primary", "css"),
         ("kup teraz", "role"),
     )
+
+    async def _page_notice(self):
+        """Tekst widocznego powiadomienia/toastu Vinted (np. 'Nie możesz kupić własnego przedmiotu'). '' gdy brak."""
+        try:
+            notices = await self.page.eval_on_selector_all(
+                '[role="alert"], [class*="otification"], [class*="oast"]',
+                "els => els.map(e => (e.innerText || '').trim()).filter(Boolean)")
+            return " | ".join(dict.fromkeys(notices))[:300]
+        except Exception:
+            return ""
 
     async def _click_buy_now(self):
         """Klik 'Kup teraz'. Próbuje kolejnych selektorów; zwraca liczbę dopasowań dla logu."""
