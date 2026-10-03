@@ -97,3 +97,25 @@ def test_open_item_navigates_without_buying(tmp_path):
     account = _account_with_page(tmp_path, {"status": 200, "body": "{}"})
     url = "https://www.vinted.pl/items/123-laptop"
     assert asyncio.run(account.open_item(url)) == url and account.page.goto_urls == [url]
+
+
+def test_is_session_refresh_detects_loop():
+    assert acc.VintedAccount.is_session_refresh("https://www.vinted.pl/session-refresh?ref_url=%2F") is True
+    assert acc.VintedAccount.is_session_refresh("https://www.vinted.pl/") is False
+    assert acc.VintedAccount.is_session_refresh("") is False
+
+
+def test_reset_profile_removes_dir(tmp_path):
+    account = acc.VintedAccount(AccountConfig(), tmp_path)
+    account.profile_dir.mkdir(parents=True)
+    (account.profile_dir / "Cookies").write_text("stare", encoding="utf-8")
+    account.reset_profile()
+    assert not account.profile_dir.exists()
+
+
+def test_stuck_on_session_refresh_when_not_refresh(tmp_path):
+    import asyncio
+    account = acc.VintedAccount(AccountConfig(), tmp_path)
+    account.page = FakePage({"status": 200, "body": "{}"})
+    account.page.goto_urls.append("https://www.vinted.pl/")      # nie jest to session-refresh
+    assert asyncio.run(account._stuck_on_session_refresh()) is False

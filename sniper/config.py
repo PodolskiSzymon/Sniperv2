@@ -291,6 +291,31 @@ class AccountConfig:
     nav_timeout: float = _env_float("SNIPER_ACCOUNT_NAV_TIMEOUT", 45.0)
     # Ścieżka do chrome.exe - tylko gdy Playwright nie znajduje przeglądarki sam (puste = automatycznie).
     chrome_path: str = _env("SNIPER_ACCOUNT_CHROME_PATH")
+    # Rozmiar okna strony (viewport) w px: "szerokość x wysokość". Okno systemowe jest nieco większe (pasek przeglądarki).
+    viewport: str = _env("SNIPER_ACCOUNT_VIEWPORT", "1280x900")
+
+    @property
+    def viewport_size(self):
+        try:
+            w, h = self.viewport.lower().split("x", 1)
+            return {"width": int(w), "height": int(h)}
+        except (ValueError, AttributeError):
+            return {"width": 1280, "height": 900}
+
+
+@dataclass(frozen=True)
+class BuyerConfig:
+    """Auto-zakup okazji z konta (sniper.buyer). Z domowego IP przez sesję account_session (bez proxy).
+
+    Bot NIGDY nie płaci: dochodzi do ekranu płatności, sprawdza limity i woła Ciebie - klik 'Zapłać'
+    oraz captchę (suwak) robisz Ty. Tu są tylko twarde limity, które muszą przejść, zanim checkout powstanie.
+    """
+    enabled: bool = _env_bool("SNIPER_BUY_ENABLED", False)
+    # Twarde limity bezpieczeństwa:
+    max_total_pln: float = _env_float("SNIPER_BUY_MAX_TOTAL", 2500.0)   # maksymalna suma do zapłaty (z wysyłką i opłatą)
+    max_per_day: int = _env_int("SNIPER_BUY_MAX_PER_DAY", 2)            # ile zakupów na dobę
+    pl_only: bool = _env_bool("SNIPER_BUY_PL_ONLY", True)               # tylko sprzedawca z Polski
+    min_score: float = _env_float("SNIPER_BUY_MIN_SCORE", 8.0)          # minimalna ocena AI (zwykle > próg maila)
 
 
 @dataclass(frozen=True)
@@ -336,6 +361,7 @@ class ScoutConfig:
     smtp: SmtpConfig = field(default_factory=SmtpConfig)
     ai: AiConfig = field(default_factory=AiConfig)
     account: AccountConfig = field(default_factory=AccountConfig)
+    buyer: BuyerConfig = field(default_factory=BuyerConfig)
 
     @property
     def catalog_id(self):
