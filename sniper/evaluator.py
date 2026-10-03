@@ -1,4 +1,6 @@
-"""Ocena ofert przez model AI (Claude, API Anthropic) według wytycznych z sniper/guidelines.md.
+"""Ocena ofert przez model AI według wytycznych z sniper/guidelines.md.
+
+Dostawcy (SNIPER_AI_PROVIDER): gemini (Google AI Studio, domyślnie gemini-3.8-flash) albo anthropic (Claude).
 
 Przepływ (wszystko w tle - pętla skanująca nigdy nie czeka na AI):
   Scout.emit(offer) -> OfferEvaluator.submit(offer)
@@ -7,8 +9,9 @@ Przepływ (wszystko w tle - pętla skanująca nigdy nie czeka na AI):
     3. wynik (albo błąd) -> logs/evaluations.jsonl + logs/evaluations.csv,
     4. mail: okazja (score >= SNIPER_AI_MIN_SCORE), nieoceniona (błąd AI) albo wszystko (SNIPER_AI_NOTIFY_ALL).
 
-Zdjęcia idą do modelu jako URL-e (photo_urls) - pobiera je Anthropic, nie my.
-Wywołanie API idzie bezpośrednio z komputera, NIE przez proxy IPRoyal (to osobny klient HTTP).
+Zdjęcia idą do modelu jako URL-e (photo_urls) - pobiera je dostawca AI, nie my. Dla Gemini można zamiast tego
+pobierać je samemu (SNIPER_AI_PHOTOS=download) - bezpośrednio, z domowego IP.
+Wywołania idą bezpośrednio z komputera, NIE przez proxy IPRoyal (osobne klienty HTTP).
 
 Test bez czekania na ogłoszenie (kosztuje jedno wywołanie na ofertę):
     python -m sniper.evaluator            # ostatnia oferta z logs/offers.jsonl (albo przykładowa)
@@ -24,7 +27,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import anthropic
+import httpx
 
 from .config import MODEL_PRICES, AiConfig
 
@@ -186,34 +189,20 @@ def offer_text(offer):
     )
 
 
-def build_request(offer, cfg: AiConfig, guidelines, with_photos=True):
-    """Argumenty dla client.beta.messages.create(...)."""
-    photos = offer.photo_urls[:max(cfg.max_photos, 0)] if with_photos else []
-    content = []
+def _photo_intro(offer, photos):
     if photos:
-        content.append({"type": "text", "text": f"Zdjęcia z ogłoszenia ({len(photos)} z {len(offer.photo_urls)}):"})
-        content += [{"type": "image", "source": {"type": "url", "url": url}} for url in photos]
-    elif offer.photo_urls:
-        content.append({"type": "text", "text": "(Zdjęcia niedostępne - oceń na podstawie tekstu.)"})
-    content.append({"type": "text", "text": offer_text(offer) + "\n\nOceń tę ofertę według wytycznych."})
+        return f"Zdjęcia z ogłoszenia ({len(photos)} z {len(offer.photo_urls)}):"
+    if offer.photo_urls:
+        return "(Zdjęcia niedostępne - oceń na podstawie tekstu.)"
+    return None
 
-    output_config = {"format": {"type": "json_schema", "schema": EVALUATION_SCHEMA}}
-    if cfg.effort:
-        output_config["effort"] = cfg.effort
-    request = {
-        "model": cfg.model,
-        "max_tokens": cfg.max_tokens,
-        # Stała część (instrukcja + wytyczne) w cache - kolejne oceny płacą za nią ~5% ceny.
-        "system": [{"type": "text", "text": SYSTEM_PROMPT.format(guidelines=guidelines),
-                    "cache_control": {"type": "ephemeral"}}],
-        "messages": [{"role": "user", "content": content}],
-        "output_config": output_config,
-    }
-    if cfg.fallback:
-        # Gdy model odmówi odpowiedzi, API samo powtórzy zapytanie na zalecanym modelu zapasowym.
-        request["betas"] = [FALLBACK_BETA]
-        request["fallbacks"] = "default"
-    return request, len(photos)
+
+def _task_text(offer):
+    return offer_text(offer) + "\n\nOceń tę ofertę według wytycznych."
+
+
+def system_text(guidelines):
+    return SYSTEM_PROMPT.format(guidelines=guidelines)
 
 
 def _num(value):
@@ -223,20 +212,14 @@ def _num(value):
         return None
 
 
-def parse_evaluation(response):
-    """Odpowiedź API -> słownik oceny. Rzuca EvaluationError / InvalidResponse."""
-    if response.stop_reason == "refusal":
-        details = getattr(response, "stop_details", None)
-        raise EvaluationError(f"model odmówił oceny ({getattr(details, 'category', None) or 'bez kategorii'})")
-    if response.stop_reason == "max_tokens":
-        raise EvaluationError("odpowiedź ucięta (max_tokens) - zwiększ SNIPER_AI_MAX_TOKENS")
-    text = "".join(block.text for block in response.content if getattr(block, "type", None) == "text")
+def normalize_evaluation(text):
+    """JSON od modelu -> słownik oceny (ujednolicone typy). Rzuca InvalidResponse."""
     try:
         data = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise InvalidResponse(f"niepoprawny JSON od modelu: {text[:200]!r}") from exc
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise InvalidResponse(f"niepoprawny JSON od modelu: {str(text)[:200]!r}") from exc
     if not isinstance(data, dict) or "score" not in data:
-        raise InvalidResponse(f"brak pola score w odpowiedzi: {text[:200]!r}")
+        raise InvalidResponse(f"brak pola score w odpowiedzi: {str(text)[:200]!r}")
     score = _num(data.get("score"))
     flags = data.get("red_flags") or []
     return {
@@ -252,28 +235,247 @@ def parse_evaluation(response):
     }
 
 
+def _usage(input_tokens=0, output_tokens=0, cache_creation=0, cache_read=0):
+    return {"input_tokens": input_tokens or 0, "output_tokens": output_tokens or 0,
+            "cache_creation_input_tokens": cache_creation or 0, "cache_read_input_tokens": cache_read or 0}
+
+
+# ---------------------------------------------------------------------------- Claude (Anthropic)
+def build_request(offer, cfg: AiConfig, guidelines, with_photos=True):
+    """Argumenty dla Anthropic client.beta.messages.create(...)."""
+    photos = offer.photo_urls[:max(cfg.max_photos, 0)] if with_photos else []
+    content = []
+    intro = _photo_intro(offer, photos)
+    if intro:
+        content.append({"type": "text", "text": intro})
+    content += [{"type": "image", "source": {"type": "url", "url": url}} for url in photos]
+    content.append({"type": "text", "text": _task_text(offer)})
+
+    output_config = {"format": {"type": "json_schema", "schema": EVALUATION_SCHEMA}}
+    if cfg.effort:
+        output_config["effort"] = cfg.effort
+    request = {
+        "model": cfg.model,
+        "max_tokens": cfg.max_tokens,
+        # Stała część (instrukcja + wytyczne) w cache - kolejne oceny płacą za nią ~5% ceny.
+        "system": [{"type": "text", "text": system_text(guidelines), "cache_control": {"type": "ephemeral"}}],
+        "messages": [{"role": "user", "content": content}],
+        "output_config": output_config,
+    }
+    if cfg.fallback:
+        # Gdy model odmówi odpowiedzi, API samo powtórzy zapytanie na zalecanym modelu zapasowym.
+        request["betas"] = [FALLBACK_BETA]
+        request["fallbacks"] = "default"
+    return request, len(photos)
+
+
+def parse_evaluation(response):
+    """Odpowiedź Anthropic -> słownik oceny. Rzuca EvaluationError / InvalidResponse."""
+    if response.stop_reason == "refusal":
+        details = getattr(response, "stop_details", None)
+        raise EvaluationError(f"model odmówił oceny ({getattr(details, 'category', None) or 'bez kategorii'})")
+    if response.stop_reason == "max_tokens":
+        raise EvaluationError("odpowiedź ucięta (max_tokens) - zwiększ SNIPER_AI_MAX_TOKENS")
+    return normalize_evaluation(
+        "".join(block.text for block in response.content if getattr(block, "type", None) == "text"))
+
+
 def usage_dict(response):
     usage = getattr(response, "usage", None)
-    return {key: getattr(usage, key, None) or 0 for key in
-            ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")}
+    return _usage(*(getattr(usage, key, None) for key in
+                    ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")))
 
 
-def _retryable(exc):
-    if isinstance(exc, (asyncio.TimeoutError, anthropic.APIConnectionError, InvalidResponse)):
-        return True
-    if isinstance(exc, anthropic.APIStatusError):
-        return exc.status_code == 429 or exc.status_code >= 500
-    return False
+class AnthropicBackend:
+    def __init__(self, cfg: AiConfig, client=None):
+        import anthropic
+        self.sdk = anthropic
+        self.cfg = cfg
+        # max_retries=0: ponowienia liczymy sami (OfferEvaluator._call_model).
+        self.client = client or anthropic.AsyncAnthropic(api_key=cfg.api_key, timeout=cfg.timeout, max_retries=0)
+
+    async def generate(self, offer, guidelines, with_photos):
+        request, photos = build_request(offer, self.cfg, guidelines, with_photos)
+        response = await self.client.beta.messages.create(**request)
+        return response, usage_dict(response), photos
+
+    parse = staticmethod(parse_evaluation)
+
+    def is_photo_error(self, exc):
+        # Najczęstszy 400 przy URL-ach: API nie pobrało któregoś zdjęcia.
+        return isinstance(exc, self.sdk.BadRequestError)
+
+    def is_retryable(self, exc):
+        if isinstance(exc, self.sdk.APIConnectionError):
+            return True
+        if isinstance(exc, self.sdk.APIStatusError):
+            return exc.status_code == 429 or exc.status_code >= 500
+        return False
+
+    def describe(self, exc):
+        if isinstance(exc, self.sdk.AuthenticationError):
+            return "zły klucz API (401) - sprawdź SNIPER_AI_API_KEY"
+        if isinstance(exc, self.sdk.APIStatusError):
+            return f"HTTP {exc.status_code}: {getattr(exc, 'message', exc)}"
+        return None
+
+    async def close(self):
+        await self.client.close()
 
 
-def _describe(exc):
+# ---------------------------------------------------------------------------- Gemini (Google)
+_MIME = {".webp": "image/webp", ".png": "image/png", ".gif": "image/gif", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+
+
+def image_mime(url):
+    path = url.split("?", 1)[0].lower()
+    return next((mime for ext, mime in _MIME.items() if path.endswith(ext)), "image/jpeg")
+
+
+def build_gemini_request(offer, cfg: AiConfig, guidelines, images):
+    """Argumenty dla client.aio.models.generate_content(...).
+
+    images: lista (url, None) - Gemini pobiera zdjęcie sam z URL-a, albo (url, bajty) - pobrane przez nas.
+    """
+    from google.genai import types
+
+    parts = []
+    intro = _photo_intro(offer, images)
+    if intro:
+        parts.append(types.Part.from_text(text=intro))
+    for url, data in images:
+        mime = image_mime(url)
+        parts.append(types.Part.from_bytes(data=data, mime_type=mime) if data is not None
+                     else types.Part.from_uri(file_uri=url, mime_type=mime))
+    parts.append(types.Part.from_text(text=_task_text(offer)))
+    config = types.GenerateContentConfig(
+        system_instruction=system_text(guidelines),
+        response_mime_type="application/json",
+        response_json_schema=EVALUATION_SCHEMA,
+        max_output_tokens=cfg.max_tokens,
+        thinking_config=types.ThinkingConfig(thinking_level=cfg.effort.upper()) if cfg.effort else None,
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),   # bez narzędzi
+    )
+    return {"model": cfg.model, "contents": [types.Content(role="user", parts=parts)], "config": config}
+
+
+def _enum_name(value):
+    return str(getattr(value, "name", value) or "")
+
+
+def parse_gemini(response):
+    """Odpowiedź Gemini -> słownik oceny. Rzuca EvaluationError / InvalidResponse."""
+    feedback = getattr(response, "prompt_feedback", None)
+    if feedback is not None and getattr(feedback, "block_reason", None):
+        raise EvaluationError(f"model odmówił oceny ({_enum_name(feedback.block_reason)})")
+    candidates = getattr(response, "candidates", None) or []
+    reason = _enum_name(getattr(candidates[0], "finish_reason", None)) if candidates else ""
+    if reason == "MAX_TOKENS":
+        raise EvaluationError("odpowiedź ucięta (MAX_TOKENS) - zwiększ SNIPER_AI_MAX_TOKENS")
+    if reason in ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "RECITATION", "IMAGE_SAFETY"):
+        raise EvaluationError(f"model odmówił oceny ({reason})")
+    return normalize_evaluation(response.text)
+
+
+def gemini_usage(response):
+    meta = getattr(response, "usage_metadata", None)
+    get = lambda key: getattr(meta, key, None) or 0  # noqa: E731
+    cached = get("cached_content_token_count")
+    # prompt_token_count zawiera tokeny z cache; myślenie (thoughts) jest płatne jak wyjście.
+    return _usage(get("prompt_token_count") - cached, get("candidates_token_count") + get("thoughts_token_count"),
+                  0, cached)
+
+
+class GeminiBackend:
+    def __init__(self, cfg: AiConfig, client=None, http=None):
+        from google import genai
+        from google.genai import errors, types
+        self.errors = errors
+        self.cfg = cfg
+        # Ponowienia liczymy sami (OfferEvaluator._call_model); timeout w milisekundach.
+        self.client = client or genai.Client(api_key=cfg.api_key,
+                                             http_options=types.HttpOptions(timeout=int(cfg.timeout * 1000)))
+        # Pobieranie zdjęć (SNIPER_AI_PHOTOS=download): bezpośrednio z domowego IP, trust_env=False = bez
+        # żadnego proxy ze zmiennych systemowych. Przez IPRoyal NIC tu nie idzie.
+        self._http = http
+
+    async def _download(self, urls):
+        if self._http is None:
+            self._http = httpx.AsyncClient(trust_env=False, timeout=20.0, follow_redirects=True)
+
+        async def one(url):
+            try:
+                response = await self._http.get(url)
+                response.raise_for_status()
+                return url, response.content
+            except httpx.HTTPError as exc:
+                log.warning("[AI] Nie pobrałem zdjęcia %s: %r", url, exc)
+                return url, None
+
+        results = await asyncio.gather(*(one(url) for url in urls))
+        return [(url, data) for url, data in results if data is not None]
+
+    async def generate(self, offer, guidelines, with_photos):
+        urls = offer.photo_urls[:max(self.cfg.max_photos, 0)] if with_photos else []
+        if urls and self.cfg.photos == "download":
+            images = await self._download(urls)
+        else:
+            images = [(url, None) for url in urls]
+        request = build_gemini_request(offer, self.cfg, guidelines, images)
+        response = await self.client.aio.models.generate_content(**request)
+        return response, gemini_usage(response), len(images)
+
+    parse = staticmethod(parse_gemini)
+
+    def _code(self, exc):
+        return getattr(exc, "code", None) if isinstance(exc, self.errors.APIError) else None
+
+    def _bad_key(self, exc):
+        text = str(exc)
+        return self._code(exc) in (401, 403) or "API_KEY" in text or "API key" in text
+
+    def is_photo_error(self, exc):
+        # 400 przy zdjęciach (np. Gemini nie pobrało URL-a) - ale nie zły klucz, który Google też zgłasza jako 400.
+        return self._code(exc) == 400 and not self._bad_key(exc)
+
+    def is_retryable(self, exc):
+        # SDK używa httpx albo (gdy zainstalowany) aiohttp - błędy sieci z obu ponawiamy.
+        if isinstance(exc, (httpx.TransportError, ConnectionError)) or type(exc).__module__.startswith("aiohttp"):
+            return True
+        code = self._code(exc)
+        return code is not None and (code == 429 or code >= 500)
+
+    def describe(self, exc):
+        if isinstance(exc, self.errors.APIError):
+            if self._bad_key(exc):
+                return f"zły klucz API lub brak dostępu ({self._code(exc)}) - sprawdź SNIPER_AI_API_KEY"
+            return f"HTTP {self._code(exc)}: {getattr(exc, 'message', None) or exc}"
+        return None
+
+    async def close(self):
+        if self._http is not None:
+            await self._http.aclose()
+        aclose = getattr(getattr(self.client, "aio", None), "aclose", None)
+        if aclose:
+            await aclose()
+
+
+def make_backend(cfg: AiConfig, client=None):
+    if cfg.provider == "gemini":
+        return GeminiBackend(cfg, client)
+    if cfg.provider == "anthropic":
+        return AnthropicBackend(cfg, client)
+    raise ValueError(f"Nieznany SNIPER_AI_PROVIDER={cfg.provider!r} (gemini albo anthropic)")
+
+
+def _retryable(backend, exc):
+    return isinstance(exc, (asyncio.TimeoutError, InvalidResponse)) or backend.is_retryable(exc)
+
+
+def _describe(exc, backend=None):
     if isinstance(exc, asyncio.TimeoutError):
         return "przekroczony limit czasu"
-    if isinstance(exc, anthropic.AuthenticationError):
-        return "zły klucz API (401) - sprawdź SNIPER_AI_API_KEY"
-    if isinstance(exc, anthropic.APIStatusError):
-        return f"HTTP {exc.status_code}: {getattr(exc, 'message', exc)}"
-    return str(exc) or type(exc).__name__
+    return (backend.describe(exc) if backend else None) or str(exc) or type(exc).__name__
 
 
 # ---------------------------------------------------------------------------- statystyki
@@ -297,9 +499,9 @@ class OfferEvaluator:
         self.cfg = cfg
         self.notifier = notifier
         self.log_dir = Path(log_dir) if log_dir else None
-        # Osobny klient HTTP Anthropic - bez proxy IPRoyal (nie dostaje SNIPER_PROXY_*).
-        # max_retries=0: ponowienia liczymy sami (patrz _call_model).
-        self.client = client or anthropic.AsyncAnthropic(api_key=cfg.api_key, timeout=cfg.timeout, max_retries=0)
+        # Osobny klient HTTP dostawcy AI - bez proxy IPRoyal (nie dostaje SNIPER_PROXY_*).
+        self.backend = make_backend(cfg, client)
+        self.client = self.backend.client
         self.guidelines = Guidelines(cfg.guidelines_file)
         self._slots = asyncio.Semaphore(max(cfg.max_concurrent, 1))
         self._tasks = set()
@@ -310,9 +512,9 @@ class OfferEvaluator:
         self._price_out = cfg.price_out if cfg.price_out is not None else default_out
 
     def describe(self):
-        return (f"model {self.cfg.model} (effort {self.cfg.effort or '-'}), mail od oceny {self.cfg.min_score:g}/10"
+        return (f"{self.cfg.provider}: model {self.cfg.model} (effort {self.cfg.effort or '-'}), mail od oceny {self.cfg.min_score:g}/10"
                 f"{' + wszystkie oferty' if self.cfg.notify_all else ''}, max {self.cfg.max_concurrent} naraz, "
-                f"wytyczne: {self.guidelines.path}")
+                f"zdjęcia: {self.cfg.photos if self.cfg.provider == 'gemini' else 'url'}, wytyczne: {self.guidelines.path}")
 
     def check_guidelines(self):
         """Przy starcie: czy plik wytycznych istnieje (brak = każda oferta 'nieoceniona')."""
@@ -344,7 +546,7 @@ class OfferEvaluator:
             record = await self.evaluate(offer)
         except Exception as exc:  # evaluate nie rzuca, ale oferta nie może zginąć w żadnym wypadku
             log.exception("[AI] Nieoczekiwany błąd oceny %s", offer.id)
-            record = self._record(offer, STATUS_FAILED, error=_describe(exc))
+            record = self._record(offer, STATUS_FAILED, error=_describe(exc, self.backend))
         self._finish(offer, record)
 
     def should_notify(self, record):
@@ -386,7 +588,7 @@ class OfferEvaluator:
                 evaluation, usage, attempts, photos = await self._call_model(offer)
             except Exception as exc:
                 self._count("failed")
-                error = _describe(exc)
+                error = _describe(exc, self.backend)
                 log.warning("[AI] Nie oceniono %s: %s - idzie mailem jako nieoceniona.", offer.id, error)
                 return self._record(offer, STATUS_FAILED, error=error,
                                     latency_s=round(time.monotonic() - started, 1))
@@ -404,26 +606,26 @@ class OfferEvaluator:
         attempt = 0
         while True:
             attempt += 1
-            request, photos = build_request(offer, self.cfg, guidelines, with_photos)
+            photos = 0
             try:
                 self._count("calls")
-                response = await asyncio.wait_for(self.client.beta.messages.create(**request), self.cfg.timeout)
-                usage = usage_dict(response)
+                response, usage, photos = await asyncio.wait_for(
+                    self.backend.generate(offer, guidelines, with_photos), self.cfg.timeout)
                 for key, value in usage.items():
                     self._count(key, value)
-                return parse_evaluation(response), usage, attempt, photos
-            except anthropic.BadRequestError as exc:
-                # Najczęstszy 400 przy URL-ach: API nie pobrało któregoś zdjęcia - ocena z samego tekstu.
-                if not with_photos or not photos:
-                    raise
-                log.warning("[AI] %s: 400 ze zdjęciami (%s) - ponawiam bez zdjęć.", offer.id, _describe(exc))
-                with_photos = False
+                return self.backend.parse(response), usage, attempt, photos
             except Exception as exc:
-                if not _retryable(exc) or attempt > self.cfg.retries:
+                if with_photos and self.backend.is_photo_error(exc):
+                    # API nie przyjęło któregoś zdjęcia - ocena z samego tekstu.
+                    log.warning("[AI] %s: 400 ze zdjęciami (%s) - ponawiam bez zdjęć.", offer.id,
+                                _describe(exc, self.backend))
+                    with_photos = False
+                    continue
+                if not _retryable(self.backend, exc) or attempt > self.cfg.retries:
                     raise
                 delay = self.cfg.retry_delay * 2 ** (attempt - 1)
-                log.info("[AI] %s: %s - próba %d/%d za %.0fs.", offer.id, _describe(exc), attempt + 1,
-                         self.cfg.retries + 1, delay)
+                log.info("[AI] %s: %s - próba %d/%d za %.0fs.", offer.id, _describe(exc, self.backend),
+                         attempt + 1, self.cfg.retries + 1, delay)
                 await asyncio.sleep(delay)
 
     # ------------------------------------------------------------------ zapis wyników
@@ -496,7 +698,7 @@ class OfferEvaluator:
         await asyncio.gather(*pending, return_exceptions=True)
 
     async def close(self):
-        await self.client.close()
+        await self.backend.close()
 
 
 # ---------------------------------------------------------------------------- test z linii poleceń
@@ -520,12 +722,12 @@ async def _cli(argv=None):
     parser.add_argument("--no-filter", action="store_true", help="oceniaj też oferty odrzucane przez filtr wstępny")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    for noisy in ("httpx", "httpx2", "anthropic"):
+    for noisy in ("httpx", "httpx2", "anthropic", "google_genai"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     cfg = ScoutConfig()
     if not cfg.ai.api_key:
-        print("Brak klucza: ustaw SNIPER_AI_API_KEY (albo ANTHROPIC_API_KEY) w sniper/.env.")
+        print("Brak klucza: ustaw SNIPER_AI_API_KEY (albo GEMINI_API_KEY / ANTHROPIC_API_KEY) w sniper/.env.")
         return 1
     evaluator = OfferEvaluator(cfg.ai, notifier=None, log_dir=cfg.log_dir)
     if not evaluator.check_guidelines():

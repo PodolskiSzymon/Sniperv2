@@ -15,7 +15,7 @@ ogłoszenia, wyciąga dane gotowe do wysyłki do modelu AI i wysyła alert e-mai
 | `extractor.py` | Czyste parsowanie JSON-ów: `details/sidebar`, `shipping_details` → `Offer`. |
 | `notifier.py` | Alert e-mail przez `aiosmtplib` (smtp.poczta.onet.pl:465, SSL), wysyłany w tle. |
 | `scout.py` | Główna, nieskończona pętla. |
-| `evaluator.py` | Ocena ofert przez AI (Claude) wg `guidelines.md`: filtr wstępny, zadania w tle, zapis do `evaluations.csv/.jsonl`, mail tylko o okazjach. |
+| `evaluator.py` | Ocena ofert przez AI (Gemini albo Claude) wg `guidelines.md`: filtr wstępny, zadania w tle, zapis do `evaluations.csv/.jsonl`, mail tylko o okazjach. |
 | `guidelines.md` | Twoje wytyczne „kiedy kupować” – edytujesz bez ruszania kodu. |
 
 ## Przepływ jednej oferty
@@ -77,9 +77,11 @@ Każda złapana oferta przechodzi przez:
 
 1. **Filtr wstępny** (zero kosztów): cena łączna `SNIPER_AI_PRICE_MIN/MAX`, słowa kluczowe `SNIPER_AI_KEYWORDS`
    (domyślnie `rtx` i numery kart) i wykluczające `SNIPER_AI_EXCLUDE_KEYWORDS` – w tytule albo tytule + opisie.
-2. **Model AI** (domyślnie `claude-opus-5-5`, API Anthropic, bezpośrednio z komputera – nie przez IPRoyal):
+2. **Model AI** – `SNIPER_AI_PROVIDER=gemini` (domyślnie `gemini-3.8-flash`, klucz z Google AI Studio) albo
+   `anthropic` (`claude-opus-5-5`); wywołanie bezpośrednio z komputera – nie przez IPRoyal:
    tytuł, cena, wysyłka, suma, stan, marka, opis, sprzedawca + do `SNIPER_AI_MAX_PHOTOS` zdjęć jako URL-e
-   (pobiera je Anthropic). Instrukcja + `guidelines.md` są w cache promptu, wynik to JSON wg schematu:
+   (pobiera je dostawca AI; dla Gemini `SNIPER_AI_PHOTOS=download` = Sniper pobiera je sam z domowego IP).
+   Wynik to JSON wg schematu:
    `is_deal, score 0-10, gpu_model, laptop_model, market_value_pln, max_buy_price_pln, potential_profit_pln,
    reasoning, red_flags`.
 3. **Mail**: tylko gdy `score >= SNIPER_AI_MIN_SCORE` (domyślnie 7), z oceną i uzasadnieniem na górze.
@@ -102,8 +104,9 @@ python -m sniper.evaluator --last 20   # ostatnie 20 ofert; --no-filter = także
 ```
 
 **Koszt**: heartbeat pokazuje liczbę wywołań, tokeny (w tym z cache) i szacunek w USD (okno + od startu).
-Orientacyjnie Opus 5.5 przy 6 zdjęciach i `effort=medium`: ~10–12 tys. tokenów wejścia + 1–3 tys. wyjścia
-≈ 0,05–0,10 USD za ocenę. Taniej: `SNIPER_AI_EFFORT=low`, mniej zdjęć, ostrzejszy filtr, albo
+Gemini 3.8 Flash: 0,75 USD / 1M tokenów wejścia i 3,75 USD / 1M wyjścia do 31.12.2026 (od 2027: 1,50 / 7,50 –
+ustaw wtedy `SNIPER_AI_PRICE_IN/OUT`) – przy ~10 tys. tokenów wejścia i 1–2 tys. wyjścia to ok. 0,01–0,02 USD
+za ocenę. Claude Opus 5.5 przy tym samym wejściu ≈ 0,05–0,10 USD. Taniej: `SNIPER_AI_EFFORT=low`, mniej zdjęć, ostrzejszy filtr, albo
 `SNIPER_AI_MODEL=claude-sonnet-5-5` (~2× taniej) / `claude-haiku-4-5` (~4× taniej; wtedy `SNIPER_AI_EFFORT=`
 i `SNIPER_AI_FALLBACK=false`).
 

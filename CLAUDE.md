@@ -1,8 +1,8 @@
 # Vinted Sniper – kontekst projektu (dla nowej rozmowy z Claude)
 
 Stan na 2026-10-02. MVP działa na komputerze użytkownika (Windows, Python 3.12, folder `F:\WEBSCRAPER`):
-wykrywa nowo dodane oferty w kategorii Vinted, sprawdza je, ocenia modelem AI (Claude) wg wytycznych
-użytkownika (`sniper/guidelines.md`) i wysyła mail o okazjach. Moduł AI dodany 2026-10-03 – czeka na test u użytkownika.
+wykrywa nowo dodane oferty w kategorii Vinted, sprawdza je, ocenia modelem AI (Gemini lub Claude) wg wytycznych
+użytkownika (`sniper/guidelines.md`) i wysyła mail o okazjach. Moduł AI dodany 2026-10-03 (użytkownik wybrał Gemini z Google AI Studio) – czeka na test u użytkownika.
 
 Rozmawiamy po polsku. Claude **nie ma dostępu do vinted.pl ze swojego środowiska** (sandbox blokuje
 domenę) – wszystko, co dotyka prawdziwego Vinted, uruchamia użytkownik u siebie i wkleja log
@@ -31,13 +31,13 @@ python -m pytest sniper/tests        # testy (bez sieci)
 | `proxy_relay.py` | Lokalny przekaźnik proxy dla Chromium (Chromium nie wysyła loginu/hasła proxy przy HTTPS → `ERR_PROXY_AUTH_UNSUPPORTED`). Dokleja `Proxy-Authorization`, liczy bajty, rozpoznaje 407. |
 | `scout.py` | Pętla: skan katalogu → nowe ID → równolegle sidebar + shipping → odrzuć sprzedane/zarezerwowane/spoza ceny → `emit()` (log, `offers.jsonl`, kolejka `scout.offers`, `evaluator.submit()` albo mail gdy AI wyłączone). Heartbeat co 60 s. |
 | `extractor.py` | Czyste parsowanie JSON → `Offer` (tytuł, cena, opis, `photo_urls` = `full_size_url`, sprzedawca, wysyłka, suma). |
-| `evaluator.py` | `OfferEvaluator`: filtr wstępny (cena, słowa) → `AsyncAnthropic` (bez proxy) `beta.messages.create` ze zdjęciami jako URL-e, `output_config.format` (JSON schema), `fallbacks: "default"`, cache promptu → `logs/evaluations.jsonl` + `.csv` → mail gdy `score >= SNIPER_AI_MIN_SCORE` albo błąd AI („nieoceniona”). Semafor, timeout, ponowienia; heartbeat z tokenami i kosztem. |
+| `evaluator.py` | `OfferEvaluator`: filtr wstępny (cena, słowa) → backend `GeminiBackend` (`google-genai`, `client.aio.models.generate_content`, zdjęcia `file_uri` = URL albo pobrane bajty, `response_json_schema`, `thinking_level`) lub `AnthropicBackend` (`beta.messages.create`, `output_config.format`, `fallbacks`) – oba bez proxy → `logs/evaluations.jsonl` + `.csv` → mail gdy `score >= SNIPER_AI_MIN_SCORE` albo błąd AI („nieoceniona”). Semafor, timeout, ponowienia; heartbeat z tokenami i kosztem. |
 | `guidelines.md` | Wytyczne użytkownika (progi cen kart RTX), wczytywane ponownie po zmianie. |
 | `notifier.py` | Mail tekst + HTML przez `aiosmtplib` (Onet `smtp.poczta.onet.pl:465`, SSL), wysyłany w tle; sekcja „Ocena AI” i werdykt w temacie. |
 | `dedup.py` | `RecentIds`: `deque(maxlen)` + `set`. |
 | `traffic.py` | Licznik transferu przez proxy (katalog / detale / przeglądarka) → heartbeat + `logs/traffic.csv`. |
 | `diagnose.py` | Narzędzie diagnostyczne. |
-| `tests/` | 45 testów (pytest; `test_evaluator.py` z atrapą API Anthropic), `fixtures.json` = prawdziwe odpowiedzi API. |
+| `tests/` | 52 testy (pytest; `test_evaluator.py` z atrapami API Gemini i Anthropic), `fixtures.json` = prawdziwe odpowiedzi API. |
 
 ## Ustalenia o API Vinted (zweryfikowane na żywo przez użytkownika)
 
@@ -78,10 +78,12 @@ Pełna lista: `sniper/.env.example`. `.env` i `sniper/logs/` (logi, `session.jso
 
 ## Ocena AI (zrobione, do weryfikacji u użytkownika)
 
-* Model domyślny `claude-opus-5-5` (`SNIPER_AI_MODEL`), klucz w `SNIPER_AI_API_KEY`/`ANTHROPIC_API_KEY`.
-  Zdjęcia jako URL-e (`photo_urls`, max `SNIPER_AI_MAX_PHOTOS`) – pobiera je Anthropic, nie proxy.
+* Dostawca `SNIPER_AI_PROVIDER=gemini` (model `gemini-3.8-flash`) albo `anthropic` (`claude-opus-5-5`);
+  klucz w `SNIPER_AI_API_KEY` (lub `GEMINI_API_KEY` / `ANTHROPIC_API_KEY`) – tylko w `.env` użytkownika, nigdy w repo.
+  Zdjęcia jako URL-e (`photo_urls`, max `SNIPER_AI_MAX_PHOTOS`) – pobiera je dostawca AI; Gemini ma znane
+  problemy z URL-ami (429) → wtedy `SNIPER_AI_PHOTOS=download` (pobieranie z domowego IP, bez proxy).
 * Wywołanie API idzie bezpośrednio z komputera (nie przez proxy) – nie kosztuje transferu IPRoyal.
-* Do sprawdzenia u użytkownika: czy API pobiera obrazy `images1.vinted.net` (przy 400 ocena idzie bez zdjęć –
+* Do sprawdzenia u użytkownika: czy Gemini pobiera obrazy `images1.vinted.net` (przy 400 ocena idzie bez zdjęć –
   widać to w `photos_sent: 0` w `evaluations.jsonl`), trafność ocen na historii (`python -m sniper.evaluator --last 20`).
 
 ## Pomysły na oszczędności transferu

@@ -50,15 +50,21 @@ def build_evaluator(cfg, notifier):
         log.info("[AI] Ocena AI wyłączona (SNIPER_AI_ENABLED=false) - mail o każdej ofercie.")
         return None
     if not cfg.ai.api_key:
-        log.warning("[AI] Brak SNIPER_AI_API_KEY (ANTHROPIC_API_KEY) - ocena AI wyłączona, mail o każdej ofercie.")
+        log.warning("[AI] Brak klucza SNIPER_AI_API_KEY (GEMINI_API_KEY / ANTHROPIC_API_KEY) - ocena AI wyłączona, "
+                    "mail o każdej ofercie.")
         return None
     try:
         from .evaluator import OfferEvaluator
     except ImportError as exc:
-        log.error("[AI] Brak biblioteki anthropic (%s) - uruchom: pip install -r sniper/requirements.txt. "
+        log.error("[AI] Brak biblioteki AI (%s) - uruchom: pip install -r sniper/requirements.txt. "
                   "Ocena AI wyłączona, mail o każdej ofercie.", exc)
         return None
-    evaluator = OfferEvaluator(cfg.ai, notifier, log_dir=cfg.log_dir)
+    try:
+        evaluator = OfferEvaluator(cfg.ai, notifier, log_dir=cfg.log_dir)
+    except (ImportError, ValueError) as exc:
+        log.error("[AI] Nie mogę uruchomić oceny AI: %s - pip install -r sniper/requirements.txt / sprawdź "
+                  "SNIPER_AI_PROVIDER. Mail o każdej ofercie.", exc)
+        return None
     evaluator.check_guidelines()
     log.info("[AI] Ocena AI włączona: %s", evaluator.describe())
     return evaluator

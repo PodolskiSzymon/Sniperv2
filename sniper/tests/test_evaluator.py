@@ -40,7 +40,8 @@ def ai_cfg(tmp_path, **kw):
     guidelines = tmp_path / "guidelines.md"
     if not guidelines.exists():
         guidelines.write_text("<!-- komentarz -->\nRTX 4060: maksymalna cena zakupu poniżej 1950 zł\n", encoding="utf-8")
-    base = AiConfig(enabled=True, api_key="test", model="claude-opus-5-5", effort="medium", fallback=True,
+    base = AiConfig(enabled=True, provider="anthropic", api_key="test", model="claude-opus-5-5", effort="medium",
+                    fallback=True, photos="url",
                     max_tokens=8000, max_photos=6, guidelines_file=str(guidelines), min_score=7.0,
                     notify_all=False, max_concurrent=2, timeout=5.0, retries=2, retry_delay=0.0,
                     price_min=None, price_max=9000.0, keywords=("rtx", "4060"), exclude_keywords=(),
@@ -407,3 +408,195 @@ def test_offer_roundtrip_from_jsonl():
     assert again == offer
     no_ship = Offer.from_dict({**offer.to_dict(), "shipping": None, "seller": {}})
     assert no_ship.shipping is None and no_ship.seller.name is None
+
+
+# ----------------------------------------------------------------------------- Gemini
+from google.genai import errors as genai_errors  # noqa: E402
+from google.genai import types as genai_types  # noqa: E402
+
+from sniper.evaluator import build_gemini_request, gemini_usage, image_mime  # noqa: E402
+
+
+def gemini_cfg(tmp_path, **kw):
+    return ai_cfg(tmp_path, **{"provider": "gemini", "model": "gemini-3.8-flash", **kw})
+
+
+def gemini_response(payload=EVAL_DEAL, finish="STOP", text=None, block=None):
+    return SimpleNamespace(
+        text=text if text is not None else json.dumps(payload),
+        candidates=[SimpleNamespace(finish_reason=genai_types.FinishReason(finish))],
+        prompt_feedback=SimpleNamespace(block_reason=block) if block else None,
+        usage_metadata=SimpleNamespace(prompt_token_count=4000, cached_content_token_count=1000,
+                                       candidates_token_count=250, thoughts_token_count=750),
+    )
+
+
+class FakeGemini:
+    """Atrapa genai.Client: client.aio.models.generate_content(**kw)."""
+
+    def __init__(self, *results):
+        self.results = list(results)
+        self.calls = []
+        self.aio = SimpleNamespace(models=SimpleNamespace(generate_content=self.generate_content))
+
+    async def generate_content(self, **kw):
+        self.calls.append(kw)
+        result = self.results.pop(0) if len(self.results) > 1 else self.results[0]
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+
+def genai_error(code, message="blad", status="INVALID_ARGUMENT"):
+    cls = genai_errors.ClientError if code < 500 else genai_errors.ServerError
+    return cls(code, {"error": {"code": code, "message": message, "status": status}})
+
+
+def test_gemini_request_shape(tmp_path):
+    cfg = gemini_cfg(tmp_path, max_photos=2)
+    request = build_gemini_request(laptop(photo_urls=PHOTOS), cfg, "MOJE WYTYCZNE",
+                                   [(PHOTOS[0], None), (PHOTOS[1], b"\x89PNG")])
+    assert request["model"] == "gemini-3.8-flash"
+    parts = request["contents"][0].parts
+    assert parts[0].text.startswith("Zdjęcia z ogłoszenia (2 z 9)")
+    assert parts[1].file_data.file_uri == PHOTOS[0] and parts[1].file_data.mime_type == "image/webp"
+    assert parts[2].inline_data.data == b"\x89PNG"
+    assert "1715.00 PLN" in parts[-1].text
+    config = request["config"]
+    assert "<wytyczne>\nMOJE WYTYCZNE\n</wytyczne>" in config.system_instruction
+    assert config.response_mime_type == "application/json" and config.response_json_schema == EVALUATION_SCHEMA
+    assert config.thinking_config.thinking_level.name == "MEDIUM" and config.max_output_tokens == 8000
+    assert image_mime("https://x/a.JPG?s=1") == "image/jpeg" and image_mime("https://x/a") == "image/jpeg"
+
+
+def test_gemini_usage_counts_cache_and_thoughts():
+    assert gemini_usage(gemini_response()) == {"input_tokens": 3000, "output_tokens": 1000,
+                                               "cache_creation_input_tokens": 0, "cache_read_input_tokens": 1000}
+
+
+def test_gemini_real_sdk_request(tmp_path, monkeypatch):
+    """Prawdziwy genai.Client na MockTransport: URL, klucz w nagłówku, zdjęcia jako fileData, JSON schema."""
+    for name in ("GOOGLE_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        seen["headers"] = dict(request.headers)
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "candidates": [{"content": {"role": "model", "parts": [{"text": json.dumps(EVAL_DEAL)}]},
+                            "finishReason": "STOP"}],
+            "usageMetadata": {"promptTokenCount": 5200, "candidatesTokenCount": 180, "thoughtsTokenCount": 620,
+                              "cachedContentTokenCount": 0, "totalTokenCount": 6000},
+        })
+
+    async def scenario():
+        from google import genai
+        client = genai.Client(api_key="AQ.test-key", http_options=genai_types.HttpOptions(
+            httpx_async_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))))
+        evaluator = OfferEvaluator(gemini_cfg(tmp_path), FakeNotifier(), log_dir=tmp_path, client=client)
+        record = await evaluator.evaluate(laptop())
+        await evaluator.close()
+        return record
+
+    record = run(scenario())
+    assert record["status"] == STATUS_EVALUATED and record["evaluation"]["gpu_model"] == "RTX 4060"
+    assert seen["url"].startswith("https://generativelanguage.googleapis.com/")
+    assert "models/gemini-3.8-flash:generateContent" in seen["url"]
+    assert seen["headers"]["x-goog-api-key"] == "AQ.test-key" and "proxy-authorization" not in seen["headers"]
+    body = seen["body"]
+    parts = body["contents"][0]["parts"]
+    file_data = parts[1]["fileData"]              # SDK wysyła pola w snake_case lub camelCase - API przyjmuje oba
+    assert file_data.get("fileUri", file_data.get("file_uri")) == PHOTOS[0]
+    assert file_data.get("mimeType", file_data.get("mime_type")) == "image/webp"
+    assert body["generationConfig"]["responseMimeType"] == "application/json"
+    assert body["generationConfig"]["responseJsonSchema"]["required"] == EVALUATION_SCHEMA["required"]
+    thinking = body["generationConfig"]["thinkingConfig"]
+    assert thinking.get("thinkingLevel", thinking.get("thinking_level")) == "MEDIUM"
+    assert "<wytyczne>" in body["systemInstruction"]["parts"][0]["text"]
+    assert record["usage"] == {"input_tokens": 5200, "output_tokens": 800, "cache_creation_input_tokens": 0,
+                               "cache_read_input_tokens": 0}
+
+
+def test_gemini_deal_mailed(tmp_path):
+    notifier = FakeNotifier()
+    client = FakeGemini(gemini_response())
+    evaluator = OfferEvaluator(gemini_cfg(tmp_path), notifier, log_dir=tmp_path, client=client)
+    run(submit_and_wait(evaluator, laptop()))
+    assert notifier.sent[0][1]["evaluation"]["score"] == 8 and notifier.sent[0][1]["model"] == "gemini-3.8-flash"
+    assert "gemini" in evaluator.describe()
+
+
+def test_gemini_retries_and_errors(tmp_path):
+    # 503 -> ponowienie -> sukces
+    client = FakeGemini(genai_error(503, status="UNAVAILABLE"), gemini_response())
+    record = run(OfferEvaluator(gemini_cfg(tmp_path), FakeNotifier(), client=client).evaluate(laptop()))
+    assert record["status"] == STATUS_EVALUATED and record["attempts"] == 2
+
+    # zły klucz: Google zwraca 400 API_KEY_INVALID - bez ponawiania i bez "ponów bez zdjęć"
+    bad_key = FakeGemini(genai_error(400, "API key not valid. Please pass a valid API key."))
+    record = run(OfferEvaluator(gemini_cfg(tmp_path), FakeNotifier(), client=bad_key).evaluate(laptop()))
+    assert len(bad_key.calls) == 1 and "klucz" in record["error"] and record["status"] == STATUS_FAILED
+
+    # 400 przez zdjęcie -> ponowienie bez zdjęć
+    photo = FakeGemini(genai_error(400, "Cannot fetch content from the provided URL."), gemini_response())
+    record = run(OfferEvaluator(gemini_cfg(tmp_path), FakeNotifier(), client=photo).evaluate(laptop()))
+    assert record["status"] == STATUS_EVALUATED and record["photos_sent"] == 0
+    assert len(photo.calls[1]["contents"][0].parts) == 2      # opis braku zdjęć + dane oferty
+
+    # odmowa / ucięcie
+    for response, fragment in ((gemini_response(finish="SAFETY", text=""), "odmówił"),
+                               (gemini_response(text="", block="PROHIBITED_CONTENT"), "odmówił"),
+                               (gemini_response(finish="MAX_TOKENS", text='{"is_d'), "ucięta")):
+        record = run(OfferEvaluator(gemini_cfg(tmp_path), FakeNotifier(),
+                                    client=FakeGemini(response)).evaluate(laptop()))
+        assert record["status"] == STATUS_FAILED and fragment in record["error"]
+
+
+def test_gemini_download_mode_fetches_photos_directly(tmp_path):
+    fetched = []
+
+    def cdn(request):
+        fetched.append(str(request.url))
+        if "/3/" in str(request.url):
+            return httpx.Response(404)
+        return httpx.Response(200, content=b"IMG" + str(request.url).encode()[-5:], headers={"content-type": "image/webp"})
+
+    async def scenario():
+        client = FakeGemini(gemini_response())
+        evaluator = OfferEvaluator(gemini_cfg(tmp_path, photos="download"), FakeNotifier(), client=client)
+        evaluator.backend._http = httpx.AsyncClient(transport=httpx.MockTransport(cdn))
+        record = await evaluator.evaluate(laptop())
+        await evaluator.close()
+        return record, client.calls[0]["contents"][0].parts
+
+    record, parts = run(scenario())
+    assert len(fetched) == 3 and record["photos_sent"] == 2         # 404 pominięte, oferta oceniona
+    inline = [p for p in parts if p.inline_data is not None]
+    assert len(inline) == 2 and not [p for p in parts if p.file_data is not None]
+
+
+def test_provider_and_key_from_env(monkeypatch):
+    import importlib
+    import sniper.config as config
+    for name in ("SNIPER_AI_PROVIDER", "SNIPER_AI_API_KEY", "SNIPER_AI_MODEL", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"):
+        monkeypatch.setenv(name, "")
+    monkeypatch.setenv("GEMINI_API_KEY", "AQ.z-env")
+    try:
+        importlib.reload(config)
+        cfg = config.AiConfig()
+        assert (cfg.provider, cfg.api_key, cfg.model) == ("gemini", "AQ.z-env", "gemini-3.8-flash")
+        monkeypatch.setenv("GEMINI_API_KEY", "")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+        importlib.reload(config)
+        cfg = config.AiConfig()
+        assert (cfg.provider, cfg.api_key, cfg.model) == ("anthropic", "sk-ant", "claude-opus-5-5")
+        monkeypatch.setenv("SNIPER_AI_PROVIDER", "gemini")
+        monkeypatch.setenv("SNIPER_AI_API_KEY", "AQ.ogolny")
+        importlib.reload(config)
+        cfg = config.AiConfig()
+        assert (cfg.provider, cfg.api_key) == ("gemini", "AQ.ogolny")
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)

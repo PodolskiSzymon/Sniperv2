@@ -191,19 +191,45 @@ DEFAULT_AI_KEYWORDS = ("rtx,3050,3060,3070,3080,4050,4060,4070,4080,4090,"
                        "5050,5060,5070,5080,5090")
 
 
+def _ai_provider():
+    """SNIPER_AI_PROVIDER albo zgadnięty z tego, który klucz jest w .env (domyślnie gemini)."""
+    provider = _env("SNIPER_AI_PROVIDER").lower()
+    if provider:
+        return provider
+    if _env("GEMINI_API_KEY") or _env("GOOGLE_API_KEY"):
+        return "gemini"
+    if _env("ANTHROPIC_API_KEY"):
+        return "anthropic"
+    return "gemini"
+
+
+def _ai_api_key(provider):
+    specific = (_env("GEMINI_API_KEY") or _env("GOOGLE_API_KEY")) if provider == "gemini" else _env("ANTHROPIC_API_KEY")
+    return _env("SNIPER_AI_API_KEY") or specific
+
+
+AI_DEFAULT_MODELS = {"gemini": "gemini-3.8-flash", "anthropic": "claude-opus-5-5"}
+_AI_PROVIDER = _ai_provider()
+
+
 @dataclass(frozen=True)
 class AiConfig:
     """Ocena ofert przez model AI (sniper/evaluator.py). Wywołania idą bezpośrednio, NIE przez proxy IPRoyal."""
     enabled: bool = _env_bool("SNIPER_AI_ENABLED", True)
-    # Klucz Anthropic: SNIPER_AI_API_KEY albo standardowe ANTHROPIC_API_KEY.
-    api_key: str = _env("SNIPER_AI_API_KEY") or _env("ANTHROPIC_API_KEY")
-    model: str = _env("SNIPER_AI_MODEL", "claude-opus-5-5")
-    # Głębokość myślenia: low / medium / high (puste = nie wysyłamy - np. dla Haiku).
-    effort: str = _env("SNIPER_AI_EFFORT", "medium")
-    # Zapasowy model po stronie API, gdy główny odmówi odpowiedzi (fallbacks: "default").
+    # gemini (Google AI Studio) albo anthropic (Claude).
+    provider: str = _AI_PROVIDER
+    # Klucz: SNIPER_AI_API_KEY albo standardowe GEMINI_API_KEY / GOOGLE_API_KEY / ANTHROPIC_API_KEY.
+    api_key: str = _ai_api_key(_AI_PROVIDER)
+    model: str = _env("SNIPER_AI_MODEL") or AI_DEFAULT_MODELS.get(_AI_PROVIDER, "")
+    # Głębokość myślenia: low / medium / high (Gemini: thinking_level, Claude: effort). Puste = domyślna modelu.
+    effort: str = _env("SNIPER_AI_EFFORT", "medium").lower()
+    # Tylko Claude: zapasowy model po stronie API, gdy główny odmówi odpowiedzi (fallbacks: "default").
     fallback: bool = _env_bool("SNIPER_AI_FALLBACK", True)
     max_tokens: int = _env_int("SNIPER_AI_MAX_TOKENS", 8000)
     max_photos: int = _env_int("SNIPER_AI_MAX_PHOTOS", 6)
+    # Tylko Gemini: url = Google pobiera zdjęcia sam; download = pobieramy je bezpośrednio (domowe IP, bez proxy)
+    # i wysyłamy w zapytaniu.
+    photos: str = _env("SNIPER_AI_PHOTOS", "url").lower()
     guidelines_file: str = _env("SNIPER_AI_GUIDELINES") or str(Path(__file__).with_name("guidelines.md"))
 
     # Mail tylko gdy ocena >= min_score; notify_all=true -> mail o każdej ofercie (z oceną albo bez).
@@ -234,8 +260,11 @@ class AiConfig:
         return self.enabled and bool(self.api_key)
 
 
-# USD za 1M tokenów (wejście, wyjście) - cennik Anthropic, stan 2026-09.
+# USD za 1M tokenów (wejście, wyjście). Gemini 3.x Flash: cena promocyjna do 31.12.2026,
+# od 2027 r. 1,50 / 7,50 - wtedy ustaw SNIPER_AI_PRICE_IN / SNIPER_AI_PRICE_OUT. Claude: cennik 2026-09.
 MODEL_PRICES = {
+    "gemini-3.8-flash": (0.75, 3.75),
+    "gemini-3.7-flash": (0.75, 3.75),
     "claude-opus-5-5": (4.0, 20.0),
     "claude-sonnet-5-5": (2.0, 10.0),
     "claude-haiku-4-5": (1.0, 5.0),
