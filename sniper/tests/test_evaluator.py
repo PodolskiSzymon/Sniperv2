@@ -607,3 +607,17 @@ def test_cli_sample_offer_passes_prefilter(tmp_path):
     offer = sample_laptop_offer()
     assert prefilter(offer, gemini_cfg(tmp_path, keywords=AiConfig().keywords)) is None
     assert offer.photo_urls == [] and "vinted.pl/items" not in offer.url
+
+
+def test_seller_country_and_poland_rule_reach_model(tmp_path):
+    from sniper.evaluator import offer_text, system_text
+    from pathlib import Path
+    assert "kraj: Polska (PL)" in offer_text(laptop())
+    foreign = laptop(seller=Seller(id=2, name="x", country="Litwa", country_code="LT", feedback_count=1,
+                                   feedback_reputation=1.0, stars=5.0, business=False))
+    assert "kraj: Litwa (LT)" in offer_text(foreign)
+    unknown = laptop(seller=Seller(*[None] * 8))
+    assert "kraj: nieznany" in offer_text(unknown)
+    guidelines = Path("sniper/guidelines.md").read_text(encoding="utf-8")
+    assert "PREMIA ZA POLSKĘ" in guidelines and "+150 zł" in guidelines
+    assert "kraj sprzedawcy" in system_text(guidelines)
