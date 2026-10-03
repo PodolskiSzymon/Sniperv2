@@ -49,11 +49,3 @@ w martwy przycisk i NIC się nie dzieje (żadnego błędu). Dlatego:
 - `sniper/account_session.py` — steruje przeglądarką: `_click_buy_now` (selektory), `open_item` +
   `_dismiss_consent` + `wait_for_load_state` + pętla ponawiania w `buy_now_and_get_checkout`.
 - `sniper/buyer.py` — dyryguje (decyzja, limity, rejestr `bought.jsonl`); woła metody z account_session.
-- Test: `python -m sniper.buyer "<link do oferty>" --ignore-limits` (dochodzi do checkoutu, NIE płaci).
-
-## Zasady, których trzymamy się twardo
-- **Bot nie płaci.** Klik „Zapłać” i suwak potwierdzenia robi człowiek. Nie automatyzujemy finalizacji
-  płatności ani nie obchodzimy captchy / zabezpieczeń anty-bot (datadome).
-- **Sesja konta tylko z domowego IP, nigdy przez proxy IPRoyal.**
-- **Nie commitować sekretów** (`my_headers.txt`, ciastka, tokeny, profil przeglądarki — są w `.gitignore`).
-- Selektory i endpointy zmieniamy tylko na podstawie realnego HTML/ruchu z F12 u użytkownika, nie z głowy.

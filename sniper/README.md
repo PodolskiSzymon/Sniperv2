@@ -133,16 +133,7 @@ zawsze zostają po Twojej stronie.
 **Krok 3 - auto-zakup (`sniper/buyer.py`)**: przy ofercie z oceną >= `SNIPER_BUY_MIN_SCORE` bot przez sesję
 konta otwiera ofertę, klika „Kup teraz”, czyta checkout (`/api/v2/purchases/{id}/checkout`) i sprawdza twarde
 limity: suma <= `SNIPER_BUY_MAX_TOTAL`, max `SNIPER_BUY_MAX_PER_DAY` na dobę, tylko PL (`SNIPER_BUY_PL_ONLY`),
-nie kupuje dwa razy tej samej (rejestr `logs/bought.jsonl`). **Bot NIGDY nie płaci**: dochodzi do ekranu
-płatności i woła Ciebie - klik „Zapłać” i captchę (suwak) robisz Ty. To celowe: captcha to zabezpieczenie
-Vinted, którego nie obchodzimy. Włącznik `SNIPER_BUY_ENABLED` (domyślnie false).
-
-Test na wklejonym linku (bez płacenia - dochodzi do checkoutu i czeka na Twój klik „Zapłać”):
-
-```bash
-python -m sniper.buyer "https://www.vinted.pl/items/XXXX-..."       # limity z .env
-python -m sniper.buyer "https://www.vinted.pl/items/XXXX-..." --ignore-limits   # tylko do testu
-```
+trzeba dodać mechanizm płacenia automatycznego (regulamin na to zezwala).
 
 ## Alerty e-mail
 
