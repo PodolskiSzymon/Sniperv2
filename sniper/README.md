@@ -120,6 +120,16 @@ Włącz `SNIPER_ACCOUNT_ENABLED=true`, miej `sniper/logs/my_headers.txt` (świe�
 gdy refresh-token wygaśnie, wklej nowy cURL i uruchom ponownie. Pliki `my_headers.txt` i `account_profile/`
 są w `.gitignore`.
 
+**Pętla `session-refresh` / „ciągle się odświeża”** = sesja w profilu jest nieważna (np. po ponownym
+zalogowaniu w innej przeglądarce stare tokeny przestały działać). Napraw: zatrzymaj program, wklej ŚWIEŻY
+cURL do `my_headers.txt` i uruchom z czyszczeniem profilu:
+`python -m sniper.account_session --reset`. Program sam wykrywa tę pętlę i o niej informuje zamiast kręcić się
+w kółko.
+
+Uwaga: Vinted ma ochronę anty-bot (datadome). Zbyt częste automatyczne wejścia mogą ją wywołać - dlatego
+podtrzymanie jest rzadkie (`SNIPER_ACCOUNT_KEEPALIVE_MIN`, domyślnie 20 min). Captcha i klik „Zapłać”
+zawsze zostają po Twojej stronie.
+
 **Krok 3 - auto-zakup (`sniper/buyer.py`)**: przy ofercie z oceną >= `SNIPER_BUY_MIN_SCORE` bot przez sesję
 konta otwiera ofertę, klika „Kup teraz”, czyta checkout (`/api/v2/purchases/{id}/checkout`) i sprawdza twarde
 limity: suma <= `SNIPER_BUY_MAX_TOTAL`, max `SNIPER_BUY_MAX_PER_DAY` na dobę, tylko PL (`SNIPER_BUY_PL_ONLY`),

@@ -110,6 +110,12 @@ class VintedAccount:
     async def refresh_and_check(self):
         """Wchodzi na stronę (JS Vinted odświeża token) i sprawdza, czy jesteś zalogowany. Zwraca bool."""
         await self.page.goto(HOME_URL, wait_until="domcontentloaded")
+        if await self._stuck_on_session_refresh():
+            log.warning("[KONTO] Pętla 'session-refresh' - sesja w profilu jest nieważna. "
+                        "Napraw: zatrzymaj program, wklej ŚWIEŻY cURL do %s i uruchom z --reset "
+                        "(czyści stary profil). Patrz README.", self.headers_file.name)
+            self.username = None
+            return False
         result = await self.page.evaluate(_BANNERS_FETCH, BANNERS_PATH)
         status, body = result.get("status"), result.get("body") or ""
         if status == 401:
@@ -127,6 +133,22 @@ class VintedAccount:
         log.info("[KONTO] Sesja %s (banner bez nazwy, status %s).",
                  "aktywna" if logged else "niepewna", status)
         return logged
+
+    @staticmethod
+    def is_session_refresh(url):
+        """True, gdy URL to strona odświeżania sesji Vinted (pętla = nieważna sesja)."""
+        return "session-refresh" in (url or "")
+
+    async def _stuck_on_session_refresh(self):
+        """Wykrywa zapętlenie na /session-refresh: czeka chwilę, sprawdza, czy strona z niej wyszła."""
+        if not self.is_session_refresh(self.page.url):
+            return False
+        try:
+            # Daj stronie czas na dokończenie odświeżenia; jeśli to pętla, dalej będzie session-refresh.
+            await self.page.wait_for_url(lambda u: not self.is_session_refresh(u), timeout=15000)
+            return False
+        except Exception:
+            return self.is_session_refresh(self.page.url)
 
     async def open_item(self, url):
         """Otwiera ogłoszenie na zalogowanym koncie. NA RAZIE tylko nawigacja - nic nie kupuje."""
@@ -178,6 +200,14 @@ class VintedAccount:
             except Exception:
                 log.exception("[KONTO] Błąd podczas podtrzymania sesji - próbuję dalej.")
 
+    def reset_profile(self):
+        """Usuwa trwały profil przeglądarki - czyści stare/martwe ciastka (po ponownym logowaniu w Edge)."""
+        import shutil
+        if self.profile_dir.exists():
+            shutil.rmtree(self.profile_dir, ignore_errors=True)
+            log.info("[KONTO] Wyczyściłem profil %s - startuję od zera z ciastek z %s.",
+                     self.profile_dir, self.headers_file.name)
+
     async def close(self):
         if self.context:
             await self.context.close()
@@ -185,7 +215,13 @@ class VintedAccount:
             await self._pw.stop()
 
 
-async def main():
+async def main(argv=None):
+    import argparse
+    parser = argparse.ArgumentParser(description="Utrzymuje sesję konta Vinted 24/7 (bez proxy).")
+    parser.add_argument("--reset", action="store_true",
+                        help="wyczyść profil przeglądarki przed startem (napraw pętlę session-refresh)")
+    args = parser.parse_args(argv)
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     cfg = ScoutConfig()
     if not cfg.account.enabled:
@@ -193,6 +229,8 @@ async def main():
         print("  python -m sniper.account_session")
         return 1
     account = VintedAccount(cfg.account, cfg.log_dir)
+    if args.reset:
+        account.reset_profile()
     try:
         await account.start()
         if not account.username:
@@ -206,4 +244,5 @@ async def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))
+    import sys
+    raise SystemExit(asyncio.run(main(sys.argv[1:])))
