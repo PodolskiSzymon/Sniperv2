@@ -1,7 +1,8 @@
 """Krok 1 do auto-zakupu: sprawdź, czy nagłówki skopiowane z przeglądarki dają dostęp do TWOJEGO konta Vinted.
 
-Pobiera stronę www.vinted.pl z Twojego domowego IP (BEZ proxy IPRoyal) z ciastkami i nagłówkami, które
-wkleisz z DevTools, i szuka w HTML oznak zalogowania (Twój login / id konta). Nic nie kupuje, nic nie zmienia.
+Odpytuje /api/v2/banners z Twojego domowego IP (BEZ proxy IPRoyal) z ciastkami i nagłówkami, które wkleisz
+z DevTools, i czyta Twoją nazwę konta z odpowiedzi (baner polecający). Gdy baner nieaktywny, sprawdza stronę
+główną (link 'Wyloguj'). Nic nie kupuje, nic nie zmienia.
 
 Dlaczego bez proxy: sesja konta oraz ciastka cf_clearance / datadome są związane z IP i przeglądarką, z których
 je skopiowałeś. Wejście na konto z rotacyjnych IP IPRoyal wyglądałoby dla Vinted jak przejęcie konta.
@@ -26,6 +27,9 @@ import httpx
 from .config import BASE_HEADERS, ScoutConfig
 
 HOME_URL = "https://www.vinted.pl/"
+# Zweryfikowany przez użytkownika endpoint (cURL z F12): mała odpowiedź JSON, zawiera nazwę konta
+# w invite_url / subject, gdy aktywny jest baner polecający. same-origin, więc wystarczą BASE_HEADERS + tokeny.
+BANNERS_URL = "https://www.vinted.pl/api/v2/banners"
 DEFAULT_HEADERS_FILE = "my_headers.txt"
 # Nagłówki, które przenosimy z wklejonego cURL-a (reszta z BASE_HEADERS). cookie niesie sesję konta.
 CARRY = ("cookie", "user-agent", "x-csrf-token", "x-anon-id", "accept-language")
@@ -127,21 +131,44 @@ def find_in_saved(out_dir, needle, window=50, limit=5):
     return path, snippets
 
 
+# Nazwa konta z odpowiedzi /api/v2/banners (baner polecający): .../invite/<nazwa>/... albo "Join <nazwa> on Vinted".
+_INVITE_NAME = re.compile(r'/invite/([A-Za-z0-9_.-]{2,40})/')
+_SUBJECT_NAME = re.compile(r'Join\s+([A-Za-z0-9_.-]{2,40})\s+on Vinted')
+
+
+def detect_banners(payload):
+    """Odpowiedź /api/v2/banners -> (zalogowany: bool|None, nazwa|None).
+
+    Nazwa konta pojawia się tylko, gdy aktywny jest baner polecający - jej brak nie znaczy 'niezalogowany'.
+    """
+    name = _INVITE_NAME.search(payload) or _SUBJECT_NAME.search(payload)
+    if name:
+        return True, name.group(1)
+    return None, None
+
+
 def check(headers_file, out_dir):
+    """Zwraca (status, zalogowany, opis, zapisany_plik|None, rozmiar). Najpierw /api/v2/banners, potem HTML."""
     pasted = read_headers(headers_file)
     headers = build_headers(pasted)
     # trust_env=False: ignorujemy ewentualne HTTP(S)_PROXY ze środowiska - to ma iść z domowego IP.
     with httpx.Client(headers=headers, timeout=20.0, follow_redirects=True, trust_env=False) as client:
-        response = client.get(HOME_URL)
-    status, html = response.status_code, response.text
+        banners = client.get(BANNERS_URL)
+        if banners.status_code == 401:
+            return banners.status_code, False, "API zwróciło 401 - sesja wygasła (odśwież cURL)", None, 0
+        logged, name = detect_banners(banners.text)
+        if name:
+            return banners.status_code, True, f"zalogowany jako: {name}", None, len(banners.text)
+        # Baner polecający nieaktywny - potwierdzamy zalogowanie ze strony głównej (szuka linku 'Wyloguj').
+        home = client.get(HOME_URL)
 
+    status, html = home.status_code, home.text
     out_path = Path(out_dir) / "account_check.html"
     try:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(html, encoding="utf-8")
     except OSError:
         out_path = None
-
     logged, detail = detect_login(html)
     return status, logged, detail, out_path, len(html)
 
@@ -175,7 +202,7 @@ def main(argv=None):
         return 2
 
     print(f"Czytam nagłówki z {headers_file}")
-    print("Pobieram www.vinted.pl z Twojego IP (BEZ proxy)...")
+    print("Pytam Vinted (api/v2/banners) z Twojego IP (BEZ proxy)...")
     try:
         status, logged, detail, out_path, size = check(headers_file, log_dir)
     except (ValueError, httpx.HTTPError) as exc:

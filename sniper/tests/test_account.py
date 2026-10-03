@@ -75,16 +75,12 @@ def test_detect_login_prefers_named_user_over_anon():
     assert logged is True
 
 
-def test_check_fetches_without_proxy_and_detects(tmp_path, monkeypatch):
-    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")   # musi być zignorowane (trust_env=False)
-    seen = {}
+BANNERS_JSON = ('{"banners":{"promotional_banner":{"actions":{"primary":{"action":{"extra":'
+                '{"invite_url":"https://www.vinted.pl/invite/szymon_k/abc123",'
+                '"subject":"Join szymon_k on Vinted"}}}}}},"code":0}')
 
-    def handler(request):
-        seen["url"] = str(request.url)
-        seen["cookie"] = request.headers.get("cookie")
-        seen["ua"] = request.headers.get("user-agent")
-        return httpx.Response(200, text='<script>{"user":{"id":123456789,"login":"szymon_k"}}</script>')
 
+def _mock_client(monkeypatch, handler):
     real_client = httpx.Client
 
     def fake_client(*a, **kw):
@@ -93,14 +89,53 @@ def test_check_fetches_without_proxy_and_detects(tmp_path, monkeypatch):
 
     monkeypatch.setattr(account.httpx, "Client", fake_client)
 
+
+def test_check_uses_banners_endpoint_and_reads_username(tmp_path, monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")   # musi być zignorowane (trust_env=False)
+    seen = {}
+
+    def handler(request):
+        seen.setdefault("urls", []).append(str(request.url))
+        seen["cookie"] = request.headers.get("cookie")
+        seen["ua"] = request.headers.get("user-agent")
+        return httpx.Response(200, text=BANNERS_JSON)
+
+    _mock_client(monkeypatch, handler)
     f = tmp_path / "my_headers.txt"
     f.write_text(CURL, encoding="utf-8")
     status, logged, detail, out_path, size = account.check(f, tmp_path)
 
     assert status == 200 and logged is True and "szymon_k" in detail
-    assert seen["url"] == account.HOME_URL
+    assert seen["urls"] == [account.BANNERS_URL]              # strona główna niepotrzebna
     assert "access_token_web=TAJNE.TOKEN.XYZ" in seen["cookie"] and seen["ua"].endswith("Edg/154.0")
-    assert (tmp_path / "account_check.html").exists() and size > 0
+    assert out_path is None
+
+
+def test_check_401_means_session_expired(tmp_path, monkeypatch):
+    _mock_client(monkeypatch, lambda r: httpx.Response(401, text='{"code":100}'))
+    f = tmp_path / "my_headers.txt"
+    f.write_text(CURL, encoding="utf-8")
+    status, logged, detail, *_ = account.check(f, tmp_path)
+    assert status == 401 and logged is False and "wygasła" in detail
+
+
+def test_check_falls_back_to_home_when_no_invite_banner(tmp_path, monkeypatch):
+    def handler(request):
+        if request.url.path == "/api/v2/banners":
+            return httpx.Response(200, text='{"banners":{},"code":0}')     # brak banera polecającego
+        return httpx.Response(200, text='<a href="/member/1">x</a><button>Wyloguj</button>')
+
+    _mock_client(monkeypatch, handler)
+    f = tmp_path / "my_headers.txt"
+    f.write_text(CURL, encoding="utf-8")
+    status, logged, detail, out_path, size = account.check(f, tmp_path)
+    assert logged is True and "wylogowania" in detail and (tmp_path / "account_check.html").exists()
+
+
+def test_detect_banners_extracts_name():
+    assert account.detect_banners('x "/invite/koala_test/tok" y')[1] == "koala_test"
+    assert account.detect_banners('"subject":"Join flipper99 on Vinted"')[1] == "flipper99"
+    assert account.detect_banners('{"banners":{},"code":0}') == (None, None)
 
 
 def test_main_without_file_explains(tmp_path, capsys, monkeypatch):
