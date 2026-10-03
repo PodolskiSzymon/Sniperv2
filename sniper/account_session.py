@@ -237,18 +237,25 @@ class VintedAccount:
         finally:
             self.page.remove_listener("response", on_response)
 
+    # Selektory 'Kup teraz' w kolejności pewności (potwierdzone przez użytkownika: data-testid + klasy).
+    BUY_NOW_SELECTORS = (
+        ('[data-testid="item-buy-button"]', "css"),
+        (".details-list--actions button.web_ui__Button__primary", "css"),
+        ("kup teraz", "role"),
+    )
+
     async def _click_buy_now(self):
-        """Klik 'Kup teraz' (data-testid=item-buy-button, potwierdzony przez użytkownika). Zwraca liczbę dopasowań."""
+        """Klik 'Kup teraz'. Próbuje kolejnych selektorów; zwraca liczbę dopasowań dla logu."""
         import re as _re
-        button = self.page.get_by_test_id("item-buy-button")
-        found = await button.count()
-        if found == 0:                                      # zapas, gdyby Vinted zmieniło testid
-            button = self.page.get_by_role("button", name=_re.compile("kup teraz", _re.I))
+        for selector, kind in self.BUY_NOW_SELECTORS:
+            button = (self.page.get_by_role("button", name=_re.compile(selector, _re.I))
+                      if kind == "role" else self.page.locator(selector))
             found = await button.count()
-        if found == 0:
-            raise RuntimeError("nie znalazłem przycisku 'Kup teraz' na stronie oferty")
-        await button.first.click(timeout=self.cfg.nav_timeout * 1000)
-        return found
+            if found:
+                log.info("[KONTO] Przycisk 'Kup teraz' znaleziony selektorem: %s", selector)
+                await button.first.click(timeout=self.cfg.nav_timeout * 1000)
+                return found
+        raise RuntimeError("nie znalazłem przycisku 'Kup teraz' na stronie oferty")
 
     async def run_forever(self):
         """Pętla podtrzymująca sesję: co keepalive_min minut wchodzi na stronę i sprawdza zalogowanie."""
