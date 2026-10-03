@@ -37,7 +37,8 @@ python -m pytest sniper/tests        # testy (bez sieci)
 | `dedup.py` | `RecentIds`: `deque(maxlen)` + `set`. |
 | `traffic.py` | Licznik transferu przez proxy (katalog / detale / przeglądarka) → heartbeat + `logs/traffic.csv`. |
 | `diagnose.py` | Narzędzie diagnostyczne. |
-| `tests/` | 52 testy (pytest; `test_evaluator.py` z atrapami API Gemini i Anthropic), `fixtures.json` = prawdziwe odpowiedzi API. |
+| `account.py` | Krok 1 do auto-zakupu: test, czy nagłówki z przeglądarki logują na konto (pobiera HTML z domowego IP, bez proxy). |
+| `tests/` | 56 testów (pytest; `test_evaluator.py` z atrapami API Gemini i Anthropic), `fixtures.json` = prawdziwe odpowiedzi API. |
 
 ## Ustalenia o API Vinted (zweryfikowane na żywo przez użytkownika)
 
@@ -83,7 +84,7 @@ Pełna lista: `sniper/.env.example`. `.env` i `sniper/logs/` (logi, `session.jso
   Zdjęcia jako URL-e (`photo_urls`, max `SNIPER_AI_MAX_PHOTOS`) – pobiera je dostawca AI; Gemini ma znane
   problemy z URL-ami (429) → wtedy `SNIPER_AI_PHOTOS=download` (pobieranie z domowego IP, bez proxy).
 * Wywołanie API idzie bezpośrednio z komputera (nie przez proxy) – nie kosztuje transferu IPRoyal.
-* Do sprawdzenia u użytkownika: czy Gemini pobiera obrazy `images1.vinted.net` (przy 400 ocena idzie bez zdjęć –
+* Do sprawdzenia u użytkownika: czy Gemini pobiera obrazy `images1.vinted.net` (model zwraca `photos_seen` i `photo_notes`; log `[AI] … zdjęcia: wysłane N, AI widzi M`; przy 400 ocena idzie bez zdjęć –
   widać to w `photos_sent: 0` w `evaluations.jsonl`), trafność ocen na historii (`python -m sniper.evaluator --last 20`).
 
 ## Pomysły na oszczędności transferu

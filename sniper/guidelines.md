@@ -84,7 +84,17 @@ Maksymalna Cena Zakupu = Realna Cena Sprzedaży - 1150 zł
 --- ZASADY DODATKOWE ---
 
 1. KOREKTA WYDAJNOŚCIOWA: Laptopy z układami starszych generacji (seria 3000) kupuj ze znacznie większym dyskontem (dodatkowe -200/300 zł do progu wejścia) względem ich nowszych odpowiedników. Nowsza architektura z lepszymi technologiami (DLSS 3) sprzedaje się dużo szybciej.
-2. CZERWONE FLAGI (OMIJAC): 
+2. PREMIA ZA POLSKĘ (PŁYNNOŚĆ): Laptop od sprzedawcy z Polski (kraj sprzedawcy: Polska / PL) dochodzi szybko,
+więc szybciej go odsprzedam - taki laptop może kosztować więcej niż próg wejścia. Do „Maksymalnej ceny zakupu”
+dodaj premię zależną od wysokości tego progu:
+- próg poniżej 1000 zł: +50 zł
+- próg 1000 - 1999 zł: +150 zł
+- próg 2000 - 2999 zł: +250 zł
+- próg 3000 - 4999 zł: +350 zł
+- próg 5000 zł i więcej: +500 zł
+Przykład: RTX 4060 z Polski - próg 1950 zł + 150 zł = 2100 zł. Laptop zza granicy (albo gdy kraj sprzedawcy
+jest nieznany) - bez premii. Premię doliczaj po korekcie wydajnościowej z punktu 1.
+3. CZERWONE FLAGI (OMIJAC): 
 - Zniszczone / porysowane matryce w droższych modelach.
 - Próby finalizowania transakcji poza bezpiecznym systemem Vinted/OLX.
 - Napisane w opisie że tylko odbiór osobisty/ że to nie jest przedmiot na sprzedaż

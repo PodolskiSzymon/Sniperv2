@@ -600,3 +600,58 @@ def test_provider_and_key_from_env(monkeypatch):
     finally:
         monkeypatch.undo()
         importlib.reload(config)
+
+
+def test_cli_sample_offer_passes_prefilter(tmp_path):
+    from sniper.evaluator import sample_laptop_offer
+    offer = sample_laptop_offer()
+    assert prefilter(offer, gemini_cfg(tmp_path, keywords=AiConfig().keywords)) is None
+    assert offer.photo_urls == [] and "vinted.pl/items" not in offer.url
+
+
+def test_seller_country_and_poland_rule_reach_model(tmp_path):
+    from sniper.evaluator import offer_text, system_text
+    from pathlib import Path
+    assert "kraj: Polska (PL)" in offer_text(laptop())
+    foreign = laptop(seller=Seller(id=2, name="x", country="Litwa", country_code="LT", feedback_count=1,
+                                   feedback_reputation=1.0, stars=5.0, business=False))
+    assert "kraj: Litwa (LT)" in offer_text(foreign)
+    unknown = laptop(seller=Seller(*[None] * 8))
+    assert "kraj: nieznany" in offer_text(unknown)
+    guidelines = Path("sniper/guidelines.md").read_text(encoding="utf-8")
+    assert "PREMIA ZA POLSKĘ" in guidelines and "+150 zł" in guidelines
+    assert "kraj sprzedawcy" in system_text(guidelines)
+
+
+def test_photo_check_fields(tmp_path, caplog):
+    import logging
+    seen = {**EVAL_DEAL, "photos_seen": 3, "photo_notes": "Laptop otwarty, naklejka RTX 4060, ekran bez rys."}
+    evaluator = OfferEvaluator(ai_cfg(tmp_path), FakeNotifier(), log_dir=tmp_path, client=FakeClient(response(seen)))
+    with caplog.at_level(logging.INFO, logger="sniper.ai"):
+        record = run(evaluator.evaluate(laptop()))
+    assert record["evaluation"]["photos_seen"] == 3 and record["photos_sent"] == 3
+    assert "wysłane 3, AI widzi 3" in caplog.text and "naklejka RTX 4060" in caplog.text
+    assert "photos_seen" in EVALUATION_SCHEMA["required"]
+
+    blind = {**EVAL_DEAL, "photos_seen": 0, "photo_notes": ""}
+    evaluator = OfferEvaluator(ai_cfg(tmp_path), FakeNotifier(), client=FakeClient(response(blind)))
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="sniper.ai"):
+        run(evaluator.evaluate(laptop()))
+    assert "model ich nie widzi" in caplog.text and "SNIPER_AI_PHOTOS=download" in caplog.text
+
+    msg = build_message(laptop(), "a", "b", ai={"status": STATUS_EVALUATED, "photos_sent": 3, "evaluation": seen})
+    assert "widzi 3 z 3: Laptop otwarty" in msg.get_body(("plain",)).get_content()
+
+
+def test_csv_with_old_header_is_rotated(tmp_path):
+    old = tmp_path / "evaluations.csv"
+    old.write_text("﻿czas;status;ocena\n2026-10-03;oceniona;1\n", encoding="utf-8")
+    evaluator = OfferEvaluator(ai_cfg(tmp_path), FakeNotifier(), log_dir=tmp_path, client=FakeClient(response()))
+    run(submit_and_wait(evaluator, laptop()))
+    rows = list(csv.reader(old.read_text(encoding="utf-8-sig").splitlines(), delimiter=";"))
+    assert rows[0][-3:] == ["zdjecia_wyslane", "zdjecia_widziane", "co_na_zdjeciach"] and len(rows) == 2
+    archived = [p for p in tmp_path.glob("evaluations.*.csv")]
+    assert len(archived) == 1 and "2026-10-03;oceniona;1" in archived[0].read_text(encoding="utf-8-sig")
+    run(submit_and_wait(evaluator, laptop(id=2)))      # ten sam nagłówek - dopisuje, bez rotacji
+    assert len(list(tmp_path.glob("evaluations.*.csv"))) == 1
