@@ -182,6 +182,67 @@ class SmtpConfig:
         return bool(self.username and self.password and self.recipient)
 
 
+def _env_list(name, default=""):
+    """Lista z przecinkami: 'RTX, 4060 ,' -> ['rtx', '4060'] (małe litery, bez pustych)."""
+    return tuple(part.strip().lower() for part in _env(name, default).split(",") if part.strip())
+
+
+DEFAULT_AI_KEYWORDS = ("rtx,3050,3060,3070,3080,4050,4060,4070,4080,4090,"
+                       "5050,5060,5070,5080,5090")
+
+
+@dataclass(frozen=True)
+class AiConfig:
+    """Ocena ofert przez model AI (sniper/evaluator.py). Wywołania idą bezpośrednio, NIE przez proxy IPRoyal."""
+    enabled: bool = _env_bool("SNIPER_AI_ENABLED", True)
+    # Klucz Anthropic: SNIPER_AI_API_KEY albo standardowe ANTHROPIC_API_KEY.
+    api_key: str = _env("SNIPER_AI_API_KEY") or _env("ANTHROPIC_API_KEY")
+    model: str = _env("SNIPER_AI_MODEL", "claude-opus-5-5")
+    # Głębokość myślenia: low / medium / high (puste = nie wysyłamy - np. dla Haiku).
+    effort: str = _env("SNIPER_AI_EFFORT", "medium")
+    # Zapasowy model po stronie API, gdy główny odmówi odpowiedzi (fallbacks: "default").
+    fallback: bool = _env_bool("SNIPER_AI_FALLBACK", True)
+    max_tokens: int = _env_int("SNIPER_AI_MAX_TOKENS", 8000)
+    max_photos: int = _env_int("SNIPER_AI_MAX_PHOTOS", 6)
+    guidelines_file: str = _env("SNIPER_AI_GUIDELINES") or str(Path(__file__).with_name("guidelines.md"))
+
+    # Mail tylko gdy ocena >= min_score; notify_all=true -> mail o każdej ofercie (z oceną albo bez).
+    min_score: float = _env_float("SNIPER_AI_MIN_SCORE", 7.0)
+    notify_all: bool = _env_bool("SNIPER_AI_NOTIFY_ALL", False)
+
+    # Asynchronicznie: limit równoległych wywołań, limit czasu jednej próby, liczba ponowień.
+    max_concurrent: int = _env_int("SNIPER_AI_MAX_CONCURRENT", 3)
+    timeout: float = _env_float("SNIPER_AI_TIMEOUT", 120.0)
+    retries: int = _env_int("SNIPER_AI_RETRIES", 2)
+    retry_delay: float = _env_float("SNIPER_AI_RETRY_DELAY", 5.0)
+
+    # Tani filtr przed AI (zero kosztów): cena łączna i słowa kluczowe w tytule/opisie.
+    price_min: float | None = _env_float("SNIPER_AI_PRICE_MIN", None)
+    price_max: float | None = _env_float("SNIPER_AI_PRICE_MAX", None)
+    keywords: tuple = _env_list("SNIPER_AI_KEYWORDS", DEFAULT_AI_KEYWORDS)
+    exclude_keywords: tuple = _env_list("SNIPER_AI_EXCLUDE_KEYWORDS")
+    # Gdzie szukać słów kluczowych: "title" albo "title+description".
+    keywords_in: str = _env("SNIPER_AI_KEYWORDS_IN", "title+description").lower()
+
+    # Cena modelu w USD za 1M tokenów (wejście / wyjście) - tylko do szacunku kosztu w heartbeacie.
+    # Puste = z tabeli MODEL_PRICES poniżej.
+    price_in: float | None = _env_float("SNIPER_AI_PRICE_IN", None)
+    price_out: float | None = _env_float("SNIPER_AI_PRICE_OUT", None)
+
+    @property
+    def active(self):
+        return self.enabled and bool(self.api_key)
+
+
+# USD za 1M tokenów (wejście, wyjście) - cennik Anthropic, stan 2026-09.
+MODEL_PRICES = {
+    "claude-opus-5-5": (4.0, 20.0),
+    "claude-sonnet-5-5": (2.0, 10.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+    "claude-fable-5-1": (10.0, 50.0),
+}
+
+
 @dataclass(frozen=True)
 class ScoutConfig:
     # Zbudowane z SNIPER_PROXY_HOST + SNIPER_PROXY_AUTH (albo SNIPER_PROXY_URL) - patrz build_proxy_url().
@@ -223,6 +284,7 @@ class ScoutConfig:
     log_dir: str = _env("SNIPER_LOG_DIR") or str(Path(__file__).with_name("logs"))
 
     smtp: SmtpConfig = field(default_factory=SmtpConfig)
+    ai: AiConfig = field(default_factory=AiConfig)
 
     @property
     def catalog_id(self):

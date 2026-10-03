@@ -55,6 +55,16 @@ class Offer:
         """Słownik gotowy do serializacji i wysyłki do modelu AI."""
         return asdict(self)
 
+    @classmethod
+    def from_dict(cls, data):
+        """Odwrotność to_dict() - np. oferta wczytana z logs/offers.jsonl."""
+        data = dict(data)
+        seller = data.get("seller") or {}
+        data["seller"] = Seller(**{name: seller.get(name) for name in Seller.__dataclass_fields__})
+        if data.get("shipping") is not None:
+            data["shipping"] = Shipping(**data["shipping"])
+        return cls(**data)
+
 
 def _decimal(value):
     if value is None or value == "":

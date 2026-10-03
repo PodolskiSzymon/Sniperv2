@@ -15,6 +15,8 @@ ogłoszenia, wyciąga dane gotowe do wysyłki do modelu AI i wysyła alert e-mai
 | `extractor.py` | Czyste parsowanie JSON-ów: `details/sidebar`, `shipping_details` → `Offer`. |
 | `notifier.py` | Alert e-mail przez `aiosmtplib` (smtp.poczta.onet.pl:465, SSL), wysyłany w tle. |
 | `scout.py` | Główna, nieskończona pętla. |
+| `evaluator.py` | Ocena ofert przez AI (Claude) wg `guidelines.md`: filtr wstępny, zadania w tle, zapis do `evaluations.csv/.jsonl`, mail tylko o okazjach. |
+| `guidelines.md` | Twoje wytyczne „kiedy kupować” – edytujesz bez ruszania kodu. |
 
 ## Przepływ jednej oferty
 
@@ -69,9 +71,45 @@ pip install pytest
 python -m pytest sniper/tests
 ```
 
+## Ocena AI (`evaluator.py`)
+
+Każda złapana oferta przechodzi przez:
+
+1. **Filtr wstępny** (zero kosztów): cena łączna `SNIPER_AI_PRICE_MIN/MAX`, słowa kluczowe `SNIPER_AI_KEYWORDS`
+   (domyślnie `rtx` i numery kart) i wykluczające `SNIPER_AI_EXCLUDE_KEYWORDS` – w tytule albo tytule + opisie.
+2. **Model AI** (domyślnie `claude-opus-5-5`, API Anthropic, bezpośrednio z komputera – nie przez IPRoyal):
+   tytuł, cena, wysyłka, suma, stan, marka, opis, sprzedawca + do `SNIPER_AI_MAX_PHOTOS` zdjęć jako URL-e
+   (pobiera je Anthropic). Instrukcja + `guidelines.md` są w cache promptu, wynik to JSON wg schematu:
+   `is_deal, score 0-10, gpu_model, laptop_model, market_value_pln, max_buy_price_pln, potential_profit_pln,
+   reasoning, red_flags`.
+3. **Mail**: tylko gdy `score >= SNIPER_AI_MIN_SCORE` (domyślnie 7), z oceną i uzasadnieniem na górze.
+   Błąd AI (limit czasu, 5xx, zły klucz…) = mail „NIEOCENIONA” – oferta nie ginie. `SNIPER_AI_NOTIFY_ALL=true` =
+   mail o każdej ofercie (z oceną). Bez klucza API moduł się wyłącza i jest mail o każdej ofercie, jak dawniej.
+
+Ocena działa w osobnych zadaniach asyncio: limit `SNIPER_AI_MAX_CONCURRENT`, limit czasu `SNIPER_AI_TIMEOUT`,
+`SNIPER_AI_RETRIES` ponowień (429/5xx/sieć/zły JSON) z rosnącą przerwą. Gdy API nie pobierze zdjęcia (400),
+ocena idzie jeszcze raz z samego tekstu.
+
+**Wytyczne**: `sniper/guidelines.md` (albo `SNIPER_AI_GUIDELINES`). Zmiana pliku działa od następnej oceny, bez restartu.
+
+**Sprawdzanie trafności**: każda oferta (także odfiltrowana) trafia do `sniper/logs/evaluations.csv`
+(średniki, otwiera się w Excelu: czas, status, ocena, okazja, mail, tytuł, ceny, karta, wartość, próg, zysk,
+flagi, uzasadnienie, link) i pełny JSON do `evaluations.jsonl`. Ocena historii bez czekania:
+
+```bash
+python -m sniper.evaluator             # ostatnia oferta z logs/offers.jsonl (albo przykładowa)
+python -m sniper.evaluator --last 20   # ostatnie 20 ofert; --no-filter = także te odrzucane przez filtr
+```
+
+**Koszt**: heartbeat pokazuje liczbę wywołań, tokeny (w tym z cache) i szacunek w USD (okno + od startu).
+Orientacyjnie Opus 5.5 przy 6 zdjęciach i `effort=medium`: ~10–12 tys. tokenów wejścia + 1–3 tys. wyjścia
+≈ 0,05–0,10 USD za ocenę. Taniej: `SNIPER_AI_EFFORT=low`, mniej zdjęć, ostrzejszy filtr, albo
+`SNIPER_AI_MODEL=claude-sonnet-5-5` (~2× taniej) / `claude-haiku-4-5` (~4× taniej; wtedy `SNIPER_AI_EFFORT=`
+i `SNIPER_AI_FALLBACK=false`).
+
 ## Alerty e-mail
 
-Każda złapana oferta (na razie bez filtrowania) idzie mailem przez Onet (`smtp.poczta.onet.pl:465`, SSL).
+Bez modułu AI każda złapana oferta idzie mailem (z AI – tylko okazje i nieocenione) przez Onet (`smtp.poczta.onet.pl:465`, SSL).
 Mail ma wersję tekstową i HTML: tytuł, cena, wysyłka, suma, stan, marka, przycisk do ogłoszenia,
 miniatury + linki do zdjęć (`full_size_url`), pełny opis i sprzedawca (nazwa, kraj, ocena, liczba opinii,
 typ konta, link do profilu).
@@ -88,6 +126,7 @@ python -m sniper.notifier
 * `sniper/logs/sniper.log` – wszystko, co widać w konsoli, plus szczegóły (pełny JSON złapanych ofert,
   tracebacki). Nowy plik co północ, poprzednie jako `sniper.log.RRRR-MM-DD`, trzymane 30 dni.
 * `sniper/logs/offers.jsonl` – każda złapana oferta jako jedna linia JSON (dane dla modułu AI).
+* `sniper/logs/evaluations.csv` / `evaluations.jsonl` – oferta + odpowiedź AI (patrz „Ocena AI”).
 * `sniper/logs/traffic.csv` – co heartbeat: transfer przez proxy w podziale na katalog / detale ofert /
   przeglądarkę (bajty wysłane + odebrane, liczba zapytań) oraz prognoza MB/h. Kolumny `per_page` i
   `poll_interval` pozwalają porównać ustawienia (np. 20 ofert co 15 s vs 4 oferty co 5 s).

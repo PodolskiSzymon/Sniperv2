@@ -26,7 +26,7 @@ def setup_logging(log_dir):
         to_file.setFormatter(fmt)
         handlers.append(to_file)
     logging.basicConfig(level=logging.DEBUG, handlers=handlers, force=True)
-    for noisy in ("httpx", "httpcore", "asyncio", "aiosmtplib"):
+    for noisy in ("httpx", "httpcore", "httpx2", "anthropic", "asyncio", "aiosmtplib"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
@@ -41,6 +41,27 @@ def _quiet_connection_resets(loop, context):
         logging.getLogger("sniper.net").debug("[NET] Zdalna strona zerwała połączenie: %r", exc)
         return
     loop.default_exception_handler(context)
+
+
+def build_evaluator(cfg, notifier):
+    """Moduł oceny AI albo None (wtedy mail o każdej ofercie, jak dotąd)."""
+    log = logging.getLogger("sniper")
+    if not cfg.ai.enabled:
+        log.info("[AI] Ocena AI wyłączona (SNIPER_AI_ENABLED=false) - mail o każdej ofercie.")
+        return None
+    if not cfg.ai.api_key:
+        log.warning("[AI] Brak SNIPER_AI_API_KEY (ANTHROPIC_API_KEY) - ocena AI wyłączona, mail o każdej ofercie.")
+        return None
+    try:
+        from .evaluator import OfferEvaluator
+    except ImportError as exc:
+        log.error("[AI] Brak biblioteki anthropic (%s) - uruchom: pip install -r sniper/requirements.txt. "
+                  "Ocena AI wyłączona, mail o każdej ofercie.", exc)
+        return None
+    evaluator = OfferEvaluator(cfg.ai, notifier, log_dir=cfg.log_dir)
+    evaluator.check_guidelines()
+    log.info("[AI] Ocena AI włączona: %s", evaluator.describe())
+    return evaluator
 
 
 async def main():
@@ -65,11 +86,15 @@ async def main():
         state_file=Path(cfg.log_dir) / "session.json" if cfg.log_dir else None,
     )
     notifier = EmailNotifier(cfg.smtp)
-    scout = Scout(cfg, session, notifier)
+    evaluator = build_evaluator(cfg, notifier)
+    scout = Scout(cfg, session, notifier, evaluator)
     try:
         await scout.run()
     finally:
         await scout.shutdown()
+        if evaluator:
+            await evaluator.drain()      # oceny w locie -> ich maile trafiają do notifier
+            await evaluator.close()
         await notifier.drain()
         await session.close()
 
