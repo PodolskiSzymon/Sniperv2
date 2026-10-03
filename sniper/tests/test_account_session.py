@@ -130,3 +130,10 @@ def test_clear_profile_locks_removes_only_locks(tmp_path):
     assert not (account.profile_dir / "SingletonLock").exists()
     assert not (account.profile_dir / "lockfile").exists()
     assert (account.profile_dir / "Cookies").exists()      # ciastka (logowanie) zostają
+
+
+def test_is_checkout_url():
+    assert acc.VintedAccount._is_checkout_url("https://www.vinted.pl/api/v2/purchases/abc/checkout") is True
+    assert acc.VintedAccount._is_checkout_url("https://www.vinted.pl/api/v2/purchases/abc/checkout?x=1") is True
+    assert acc.VintedAccount._is_checkout_url("https://www.vinted.pl/api/v2/items/123") is False
+    assert acc.VintedAccount._is_checkout_url("") is False

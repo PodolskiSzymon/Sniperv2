@@ -195,27 +195,60 @@ class VintedAccount:
         except Exception:
             pass
 
+    @staticmethod
+    def _is_checkout_url(url):
+        return "/api/v2/purchases/" in (url or "") and "/checkout" in (url or "")
+
     async def buy_now_and_get_checkout(self):
-        """Klika 'Kup teraz' i zwraca JSON z /api/v2/purchases/{id}/checkout (zweryfikowany endpoint).
+        """Klika 'Kup teraz', czeka na stronę płatności i zwraca JSON z /api/v2/purchases/{id}/checkout.
 
-        Selektor przycisku 'Kup teraz' potwierdzimy na realnym teście u Ciebie - tu rozsądne podejście
-        (rola/tekst). NIE klika 'Zapłać'.
+        Dużo logów na każdym kroku - gdyby coś nie zadziałało, log mówi gdzie. NIE klika 'Zapłać'.
         """
-        def is_checkout(response):
-            return "/api/v2/purchases/" in response.url and response.url.rstrip("/").endswith("/checkout")
+        captured = []
 
-        async with self.page.expect_response(is_checkout, timeout=self.cfg.nav_timeout * 1000) as info:
-            await self._click_buy_now()
-        response = await info.value
-        return await response.json()
+        def on_response(response):
+            if self._is_checkout_url(response.url):
+                captured.append(response)
+
+        self.page.on("response", on_response)
+        try:
+            found = await self._click_buy_now()
+            log.info("[KONTO] Kliknąłem 'Kup teraz' (dopasowań przycisku: %d). Czekam na ekran płatności...", found)
+
+            try:
+                await self.page.wait_for_url(lambda u: "/checkout" in (u or ""), timeout=self.cfg.nav_timeout * 1000)
+                log.info("[KONTO] Jestem na ekranie płatności: %s", self.page.url)
+            except Exception:
+                log.warning("[KONTO] Nie przeszło na /checkout (aktualny URL: %s). "
+                            "Może przycisk wymaga innego kroku albo to Twoja własna oferta (nie da się kupić).",
+                            self.page.url)
+
+            # Odpowiedź API /checkout może przyjść chwilę po nawigacji - dajemy jej do 20 s.
+            import time as _t
+            deadline = _t.monotonic() + 20
+            while not captured and _t.monotonic() < deadline:
+                await asyncio.sleep(0.5)
+            if not captured:
+                raise RuntimeError(f"nie złapałem odpowiedzi /checkout (URL strony: {self.page.url})")
+
+            response = captured[-1]
+            log.info("[KONTO] Mam dane checkout: HTTP %s", response.status)
+            return await response.json()
+        finally:
+            self.page.remove_listener("response", on_response)
 
     async def _click_buy_now(self):
-        """Klik 'Kup teraz'. Selektor potwierdzony przez użytkownika (HTML z F12): data-testid="item-buy-button"."""
+        """Klik 'Kup teraz' (data-testid=item-buy-button, potwierdzony przez użytkownika). Zwraca liczbę dopasowań."""
         import re as _re
         button = self.page.get_by_test_id("item-buy-button")
-        if await button.count() == 0:                      # zapas, gdyby Vinted zmieniło testid
+        found = await button.count()
+        if found == 0:                                      # zapas, gdyby Vinted zmieniło testid
             button = self.page.get_by_role("button", name=_re.compile("kup teraz", _re.I))
+            found = await button.count()
+        if found == 0:
+            raise RuntimeError("nie znalazłem przycisku 'Kup teraz' na stronie oferty")
         await button.first.click(timeout=self.cfg.nav_timeout * 1000)
+        return found
 
     async def run_forever(self):
         """Pętla podtrzymująca sesję: co keepalive_min minut wchodzi na stronę i sprawdza zalogowanie."""
