@@ -182,7 +182,22 @@ class VintedAccount:
         """Otwiera ogłoszenie na zalogowanym koncie. NA RAZIE tylko nawigacja - nic nie kupuje."""
         log.info("[KONTO] Otwieram ofertę (bez zakupu): %s", url)
         await self.page.goto(url, wait_until="domcontentloaded")
+        await self._dismiss_consent()
         return self.page.url
+
+    async def _dismiss_consent(self):
+        """Zamyka baner zgody na ciastka (OneTrust/Didomi), jeśli jest - inaczej przeszkadza w kliknięciu."""
+        for selector in ("#onetrust-accept-btn-handler", "#didomi-notice-agree-button",
+                          'button:has-text("Akceptuj")', 'button:has-text("Zgadzam")'):
+            try:
+                button = self.page.locator(selector)
+                if await button.count() and await button.first.is_visible():
+                    await button.first.click(timeout=3000)
+                    log.info("[KONTO] Zamknąłem baner ciastek (%s).", selector)
+                    await asyncio.sleep(0.5)
+                    return
+            except Exception:
+                pass
 
     # ---- interfejs dla sniper.buyer.attempt_purchase (open / buy_now_and_get_checkout / focus) ----
     # Bot NIGDY nie płaci: dochodzi do ekranu płatności i woła Ciebie. Klik 'Zapłać' + captchę robisz Ty.
@@ -214,10 +229,30 @@ class VintedAccount:
         # Nasłuch na CAŁYM kontekście - łapie odpowiedź także, gdy checkout otworzy się w nowej karcie.
         self.context.on("response", on_response)
         pages_before = set(self.context.pages)
+
+        def reacted():
+            return bool(captured) or "/checkout" in (self.page.url or "") \
+                or any(p not in pages_before for p in self.context.pages)
+
         try:
-            found = await self._click_buy_now()
-            log.info("[KONTO] Kliknąłem 'Kup teraz' (dopasowań przycisku: %d). Czekam na ekran płatności...", found)
-            await asyncio.sleep(1.5)
+            # Poczekaj, aż strona się ustabilizuje - React musi podpiąć obsługę 'Kup teraz' (hydracja SPA).
+            try:
+                await self.page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
+
+            # Klik bywa "ślepy", gdy React jeszcze się ładuje - ponawiamy, aż przycisk naprawdę zareaguje.
+            for attempt in range(1, 4):
+                found = await self._click_buy_now()
+                log.info("[KONTO] Klik 'Kup teraz' (próba %d, dopasowań: %d) - czekam na reakcję...", attempt, found)
+                for _ in range(16):                 # ~8 s na reakcję po kliknięciu
+                    if reacted():
+                        break
+                    await asyncio.sleep(0.5)
+                if reacted():
+                    break
+                log.warning("[KONTO] Klik bez reakcji (strona mogła się jeszcze ładować) - ponawiam.")
+                await asyncio.sleep(1.5)
 
             new_pages = [p for p in self.context.pages if p not in pages_before]
             target = new_pages[0] if new_pages else self.page
