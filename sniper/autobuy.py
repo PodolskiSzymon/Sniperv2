@@ -41,23 +41,34 @@ class AutoBuyer:
 
     # ------------------------------------------------------------------ start / stop
     async def start(self):
-        """Uruchamia przeglądarkę konta. Zwraca True, gdy zalogowano (inaczej auto-zakup wyłączony)."""
+        """Uruchamia przeglądarkę konta. False = przeglądarka w ogóle nie wstała (auto-zakup wyłączony).
+
+        Brak zalogowania NIE zamyka okna: auto-zakup jest wstrzymany (okazje idą zwykłym mailem), a podtrzymanie
+        sesji sprawdza dalej co keepalive_min - po wklejeniu świeżego cURL do my_headers.txt wznawia się samo.
+        """
         try:
             await self.account.start()
         except Exception as exc:
             log.error("[AUTO-BUY] Nie uruchomiłem przeglądarki konta: %s - auto-zakup WYŁĄCZONY, "
                       "okazje idą zwykłym mailem.", exc)
             return False
-        if not getattr(self.account, "username", None):
-            log.error("[AUTO-BUY] Nie potwierdziłem zalogowania na konto - auto-zakup WYŁĄCZONY "
-                      "(wklej świeży cURL do my_headers.txt, ewentualnie --reset w sniper.account_session).")
-            return False
-        self.ready = True
+        logged = getattr(self.account, "logged_in", None)
+        if logged is None:
+            logged = bool(getattr(self.account, "username", None))
         self._tasks = [asyncio.create_task(self._worker(), name="autobuy-worker"),
                        asyncio.create_task(self._keepalive(), name="autobuy-keepalive")]
+        if not logged:
+            self.ready = False
+            log.error("[AUTO-BUY] Nie jesteś zalogowany na konto - auto-zakup WSTRZYMANY, okno zostaje otwarte "
+                      "(okazje idą zwykłym mailem). Wklej świeży cURL do my_headers.txt i zapisz - wgra się sam "
+                      "przy następnym sprawdzeniu (do 2 min).")
+            self._alert_session_lost()
+            return True
+        self.ready = True
         log.info("[AUTO-BUY] Auto-zakup WŁĄCZONY na koncie %s: ocena >= %g, suma <= %.0f zł, max %d/dobę%s. "
-                 "Dziś już: %d.", self.account.username, self.cfg.min_score, self.cfg.max_total_pln,
-                 self.cfg.max_per_day, ", tylko PL" if self.cfg.pl_only else "", self.ledger.count_today())
+                 "Dziś już: %d.", getattr(self.account, "username", None) or "?", self.cfg.min_score,
+                 self.cfg.max_total_pln, self.cfg.max_per_day, ", tylko PL" if self.cfg.pl_only else "",
+                 self.ledger.count_today())
         return True
 
     async def shutdown(self, timeout=PURCHASE_TIMEOUT_S):
@@ -175,15 +186,18 @@ class AutoBuyer:
             self.ready = False
             log.error("[AUTO-BUY] Sesja konta padła - auto-zakup WSTRZYMANY (okazje idą zwykłym mailem). "
                       "Wklej świeży cURL do my_headers.txt - wgra się sam przy następnym sprawdzeniu.")
-            self._alert("[Sniper] Sesja konta Vinted padła - auto-zakup WSTRZYMANY",
-                        "Zwiadowca nie jest już zalogowany na Twoje konto Vinted, więc NIE kupuje okazji "
-                        "(przychodzą zwykłym mailem).\n\nNaprawa:\n"
-                        "1. Zaloguj się na Vinted w swojej przeglądarce, F12 -> Sieć -> dowolne zapytanie do "
-                        "www.vinted.pl -> Kopiuj jako cURL (bash).\n"
-                        "2. Wklej to do sniper/logs/my_headers.txt i zapisz.\n"
-                        "Zwiadowca wgra nowe ciastka sam przy następnym sprawdzeniu sesji (co "
-                        f"{self.keepalive_min:g} min). Jeśli nie pomoże: zatrzymaj go i uruchom "
-                        "python -m sniper.account_session --reset.")
+            self._alert_session_lost()
+
+    def _alert_session_lost(self):
+        self._alert("[Sniper] Sesja konta Vinted padła - auto-zakup WSTRZYMANY",
+                    "Zwiadowca nie jest zalogowany na Twoje konto Vinted, więc NIE kupuje okazji "
+                    "(przychodzą zwykłym mailem). Okno przeglądarki konta zostaje otwarte.\n\nNaprawa:\n"
+                    "1. Zaloguj się na Vinted w swojej przeglądarce, F12 -> Sieć -> dowolne zapytanie do "
+                    "www.vinted.pl -> Kopiuj jako cURL (bash).\n"
+                    "2. Wklej to do sniper/logs/my_headers.txt i zapisz.\n"
+                    "Zwiadowca wgra nowe ciastka sam przy następnym sprawdzeniu sesji (do 2 min) "
+                    "i wznowi auto-zakup. Jeśli nie pomoże: zatrzymaj go i uruchom "
+                    "python -m sniper.account_session --reset.")
 
     def _alert(self, subject, body):
         if self.notifier is not None and hasattr(self.notifier, "notify_text"):
@@ -192,5 +206,6 @@ class AutoBuyer:
     async def _keepalive(self):
         interval = max(self.keepalive_min, 1.0) * 60
         while True:
-            await asyncio.sleep(interval)
+            # Przy wstrzymanym auto-zakupie sprawdzaj częściej (co 2 min), żeby świeży cURL szybko go wznowił.
+            await asyncio.sleep(interval if self.ready else min(interval, 120))
             await self.check_session()

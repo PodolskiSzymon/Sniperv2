@@ -93,9 +93,29 @@ def test_wants_only_deals_above_buy_threshold(tmp_path):
     assert buyer.wants(record_for(offer, status="nieoceniona")) is False
 
 
-def test_start_fails_without_login(tmp_path):
-    buyer, _ = make_buyer(tmp_path, account=FakeAccount(logged_in=False))
-    assert asyncio.run(buyer.start()) is False and buyer.ready is False
+def test_start_without_login_keeps_browser_open_and_paused(tmp_path):
+    account = FakeAccount(logged_in=False)
+    buyer, _ = make_buyer(tmp_path, account=account)
+    buyer.notifier = AlertNotifier()
+
+    async def scenario():
+        started = await buyer.start()
+        state = (started, buyer.ready, "close" in account.calls, list(buyer.notifier.alerts))
+        await buyer.shutdown()
+        return state
+
+    started, ready, closed, alerts = asyncio.run(scenario())
+    assert started is True and ready is False          # działa, ale wstrzymany
+    assert closed is False                             # okno NIE zamknięte przy starcie
+    assert len(alerts) == 1 and "padła" in alerts[0]   # mail z instrukcją
+
+
+def test_start_fails_only_when_browser_cannot_start(tmp_path):
+    class Broken(FakeAccount):
+        async def start(self):
+            raise RuntimeError("profil zajęty")
+    buyer, _ = make_buyer(tmp_path, account=Broken())
+    assert asyncio.run(buyer.start()) is False
 
 
 # ----------------------------------------------------------------------------- pełny przepływ

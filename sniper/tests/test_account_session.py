@@ -168,3 +168,41 @@ def test_seed_only_new_or_changed_headers(tmp_path):
     account.reset_profile()
     account.profile_dir.mkdir(parents=True)
     assert account.needs_seed() is True                                 # po --reset wgrywa od nowa
+
+
+def test_start_reseeds_when_profile_not_logged_in(tmp_path, monkeypatch):
+    """Profil bez ważnej sesji + pominięte ciastka -> start wgrywa je jeszcze raz i sprawdza ponownie."""
+    import asyncio
+    account = acc.VintedAccount(AccountConfig(), tmp_path)
+    account.profile_dir.mkdir(parents=True)
+    account.headers_file.write_text("curl 'https://www.vinted.pl/' -b 'a=1'", encoding="utf-8")
+    (account.profile_dir / account.SEED_MARKER).write_text(account._headers_stamp(), encoding="utf-8")
+    seeds, checks = [], iter([False, True])
+
+    class FakeCtx:
+        pages = ["strona"]
+
+        def set_default_navigation_timeout(self, ms):
+            pass
+
+        async def add_cookies(self, cookies):
+            seeds.append(cookies)
+
+    class FakeChromium:
+        async def launch_persistent_context(self, path, **kw):
+            return FakeCtx()
+
+    class FakePW:
+        chromium = FakeChromium()
+
+        async def start(self):
+            return self
+
+    import playwright.async_api as pwa
+    monkeypatch.setattr(pwa, "async_playwright", lambda: FakePW())
+
+    async def fake_check():
+        return next(checks)
+    monkeypatch.setattr(account, "refresh_and_check", fake_check)
+    asyncio.run(account.start())
+    assert len(seeds) == 1 and account.logged_in is True     # pominięte przy starcie, wgrane po porażce

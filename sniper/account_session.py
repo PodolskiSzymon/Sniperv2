@@ -69,6 +69,7 @@ class VintedAccount:
         self.context = None
         self.page = None
         self.username = None
+        self.logged_in = False
 
     def clear_profile_locks(self):
         """Usuwa pliki-blokady Chromium z profilu (zostają po niedokończonym zamknięciu)."""
@@ -104,12 +105,18 @@ class VintedAccount:
                 f"--reset' (wyczyści profil - trzeba będzie wkleić świeży cURL). Szczegół: {exc}"
             ) from exc
         self.context.set_default_navigation_timeout(self.cfg.nav_timeout * 1000)
-        _, user_agent = await self._seed_cookies()
+        seeded, _ = await self._seed_cookies()
         self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
         vp = self.cfg.viewport_size
         log.info("[KONTO] Przeglądarka uruchomiona (profil: %s, headless=%s, okno %dx%d px, bez proxy).",
                  self.profile_dir, self.cfg.headless, vp["width"], vp["height"])
-        await self.refresh_and_check()
+        self.logged_in = await self.refresh_and_check()
+        if not self.logged_in and not seeded and self.headers_file.exists():
+            # Profil bez ważnej sesji - spróbuj jeszcze ciastek z pliku (tak jak przed ograniczeniem wgrywania).
+            log.warning("[KONTO] Profil niezalogowany - wgrywam ponownie ciastka z %s i sprawdzam jeszcze raz.",
+                        self.headers_file.name)
+            await self._seed_cookies(force=True)
+            self.logged_in = await self.refresh_and_check()
         return self
 
     # Znacznik w profilu: który my_headers.txt (czas modyfikacji) już wgraliśmy.
@@ -132,12 +139,12 @@ class VintedAccount:
         except OSError:
             return True
 
-    async def _seed_cookies(self):
-        """Wstrzykuje ciastka z my_headers.txt - tylko gdy needs_seed()."""
+    async def _seed_cookies(self, force=False):
+        """Wstrzykuje ciastka z my_headers.txt - tylko gdy needs_seed() (albo force)."""
         if not self.headers_file.exists():
             log.info("[KONTO] Brak %s - polegam na zapisanym profilu przeglądarki.", self.headers_file)
             return [], None
-        if not self.needs_seed():
+        if not force and not self.needs_seed():
             log.info("[KONTO] Pomijam %s (już wgrany) - profil ma własne, odświeżane tokeny. "
                      "Nowy cURL zostanie wgrany automatycznie po zapisaniu pliku.", self.headers_file.name)
             return [], None
