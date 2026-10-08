@@ -181,10 +181,49 @@ class VintedAccount:
             self.username = name
             log.info("[KONTO] Zalogowany jako: %s", name)
             return True
-        logged = status == 200 and '"code":0' in body
-        log.info("[KONTO] Sesja %s (banner bez nazwy, status %s).",
-                 "aktywna" if logged else "niepewna", status)
-        return logged
+        # /api/v2/banners odpowiada 200/code:0 także NIEZALOGOWANEMU gościowi - samo to nie dowodzi sesji.
+        # Dodatkowo: brak widocznego „Zaloguj się” na stronie i ciastko konta access_token_web.
+        if status != 200 or '"code":0' not in body:
+            log.info("[KONTO] Sesja niepewna (banner bez nazwy, status %s) - traktuję jako niezalogowany.", status)
+            self.username = None
+            return False
+        login_button = await self._login_button_visible()
+        has_token = await self._has_account_token()
+        if login_button or has_token is False:
+            log.warning("[KONTO] NIE jesteś zalogowany (%s). Wklej świeży cURL do %s.",
+                        "na stronie jest „Zaloguj się”" if login_button else "brak ciastka access_token_web",
+                        self.headers_file.name)
+            self.username = None
+            return False
+        log.info("[KONTO] Sesja aktywna (banner bez nazwy, ale bez „Zaloguj się” i z tokenem konta).")
+        return True
+
+    async def _login_button_visible(self):
+        """True = na stronie widać „Zaloguj się” (gość). None = nie da się sprawdzić."""
+        import re as _re
+        try:
+            try:
+                await self.page.wait_for_load_state("networkidle", timeout=8000)
+            except Exception:
+                pass
+            button = self.page.get_by_text(_re.compile(r"Zaloguj się", _re.I))
+            count = await button.count()
+            for i in range(min(count, 5)):
+                if await button.nth(i).is_visible():
+                    return True
+            return False
+        except Exception:
+            return None
+
+    async def _has_account_token(self):
+        """Czy w przeglądarce jest ciastko konta access_token_web? None = nie da się sprawdzić."""
+        if self.context is None:
+            return None
+        try:
+            cookies = await self.context.cookies("https://www.vinted.pl")
+        except Exception:
+            return None
+        return any(c.get("name") == "access_token_web" and c.get("value") for c in cookies)
 
     @staticmethod
     def is_session_refresh(url):

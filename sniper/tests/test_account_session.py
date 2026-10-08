@@ -206,3 +206,63 @@ def test_start_reseeds_when_profile_not_logged_in(tmp_path, monkeypatch):
     monkeypatch.setattr(account, "refresh_and_check", fake_check)
     asyncio.run(account.start())
     assert len(seeds) == 1 and account.logged_in is True     # pominięte przy starcie, wgrane po porażce
+
+
+class _Loc:
+    def __init__(self, visible):
+        self._visible = visible
+
+    async def count(self):
+        return 1 if self._visible is not None else 0
+
+    def nth(self, i):
+        return self
+
+    async def is_visible(self):
+        return bool(self._visible)
+
+
+class GuestPage(FakePage):
+    """Strona jak dla gościa: banners 200/code:0 bez nazwy, ale w nagłówku „Zaloguj się”."""
+    def __init__(self, login_visible):
+        super().__init__({"status": 200, "body": '{"banners":{},"code":0}'})
+        self._login_visible = login_visible
+
+    async def wait_for_load_state(self, state, timeout=None):
+        return None
+
+    def get_by_text(self, pattern):
+        return _Loc(self._login_visible)
+
+
+class _Ctx:
+    def __init__(self, cookies):
+        self._cookies = cookies
+
+    async def cookies(self, url=None):
+        return self._cookies
+
+
+def test_banners_ok_but_login_button_means_logged_out(tmp_path):
+    import asyncio
+    account = acc.VintedAccount(AccountConfig(), tmp_path)
+    account.page = GuestPage(login_visible=True)
+    assert asyncio.run(account.refresh_and_check()) is False        # fałszywe „Sesja aktywna” z logu użytkownika
+
+
+def test_banners_ok_without_account_token_means_logged_out(tmp_path):
+    import asyncio
+    account = acc.VintedAccount(AccountConfig(), tmp_path)
+    account.page = GuestPage(login_visible=None)
+    account.context = _Ctx([{"name": "anon_id", "value": "x"}])
+    account.headers_file = tmp_path / "brak.txt"                      # needs_seed() = False
+    assert asyncio.run(account.refresh_and_check()) is False
+
+
+def test_banners_ok_with_token_and_no_login_button_is_logged_in(tmp_path):
+    import asyncio
+    account = acc.VintedAccount(AccountConfig(), tmp_path)
+    account.page = GuestPage(login_visible=False)
+    account.context = _Ctx([{"name": "access_token_web", "value": "tok"}])
+    account.headers_file = tmp_path / "brak.txt"
+    assert asyncio.run(account.refresh_and_check()) is True
