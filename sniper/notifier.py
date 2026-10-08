@@ -277,6 +277,31 @@ class EmailNotifier:
             self.failed += 1
             log.error("[MAIL] Nie udało się wysłać alertu dla %s: %r", offer.id, exc)
 
+    def notify_text(self, subject, body):
+        """Nieblokujący mail systemowy (np. „sesja konta padła”) - bez oferty."""
+        if not self.cfg.enabled:
+            return
+        task = asyncio.create_task(self._send_text(subject, body), name="mail-alert")
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _send_text(self, subject, body):
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = self.cfg.sender
+        msg["To"] = self.cfg.recipient
+        msg["Date"] = formatdate(localtime=True)
+        msg["Message-ID"] = make_msgid(domain="sniper.local")
+        msg.set_content(body)
+        try:
+            await aiosmtplib.send(msg, hostname=self.cfg.host, port=self.cfg.port, username=self.cfg.username,
+                                  password=self.cfg.password, use_tls=True, timeout=self.cfg.timeout)
+            self.sent += 1
+            log.info("[MAIL] Wysłano powiadomienie: %s", subject)
+        except Exception as exc:
+            self.failed += 1
+            log.error("[MAIL] Nie udało się wysłać powiadomienia „%s”: %r", subject, exc)
+
     async def drain(self, timeout=15.0):
         """Przy zamykaniu programu - daje szansę dokończyć wysyłkę maili w locie."""
         if self._tasks:

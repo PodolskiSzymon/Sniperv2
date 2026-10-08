@@ -112,18 +112,49 @@ class VintedAccount:
         await self.refresh_and_check()
         return self
 
+    # Znacznik w profilu: który my_headers.txt (czas modyfikacji) już wgraliśmy.
+    SEED_MARKER = "sniper_seeded_headers.txt"
+
+    def _headers_stamp(self):
+        return str(self.headers_file.stat().st_mtime_ns)
+
+    def needs_seed(self):
+        """Czy wgrać ciastka z my_headers.txt? Tylko nowy/wyczyszczony profil albo ŚWIEŻO wklejony cURL.
+
+        Profil sam trzyma aktualne tokeny (Vinted je odświeża). Ponowne wgranie STAREGO access/refresh tokena
+        z my_headers.txt przy każdym starcie nadpisywało te nowsze i kończyło się pętlą 'session-refresh'.
+        """
+        if not self.headers_file.exists():
+            return False
+        marker = self.profile_dir / self.SEED_MARKER
+        try:
+            return marker.read_text(encoding="utf-8").strip() != self._headers_stamp()
+        except OSError:
+            return True
+
     async def _seed_cookies(self):
-        """Wstrzykuje ciastka z my_headers.txt, jeśli plik istnieje."""
+        """Wstrzykuje ciastka z my_headers.txt - tylko gdy needs_seed()."""
         if not self.headers_file.exists():
             log.info("[KONTO] Brak %s - polegam na zapisanym profilu przeglądarki.", self.headers_file)
             return [], None
+        if not self.needs_seed():
+            log.info("[KONTO] Pomijam %s (już wgrany) - profil ma własne, odświeżane tokeny. "
+                     "Nowy cURL zostanie wgrany automatycznie po zapisaniu pliku.", self.headers_file.name)
+            return [], None
         cookies, user_agent = load_account_cookies(self.headers_file)
         await self.context.add_cookies(cookies)
-        log.info("[KONTO] Wczytałem %d ciastek z %s.", len(cookies), self.headers_file.name)
+        try:
+            (self.profile_dir / self.SEED_MARKER).write_text(self._headers_stamp(), encoding="utf-8")
+        except OSError as exc:
+            log.warning("[KONTO] Nie zapisałem znacznika wgrania ciastek: %s", exc)
+        log.info("[KONTO] Wczytałem %d ciastek z %s (nowy plik albo nowy profil).", len(cookies), self.headers_file.name)
         return cookies, user_agent
 
     async def refresh_and_check(self):
         """Wchodzi na stronę (JS Vinted odświeża token) i sprawdza, czy jesteś zalogowany. Zwraca bool."""
+        if self.context is not None and self.needs_seed():
+            log.info("[KONTO] %s zmieniony - wgrywam nowe ciastka bez restartu.", self.headers_file.name)
+            await self._seed_cookies()
         await self.page.goto(HOME_URL, wait_until="domcontentloaded")
         if await self._stuck_on_session_refresh():
             log.warning("[KONTO] Pętla 'session-refresh' - sesja w profilu jest nieważna. "

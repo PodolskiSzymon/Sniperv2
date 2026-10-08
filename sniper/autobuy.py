@@ -158,14 +158,39 @@ class AutoBuyer:
         purchase["summary"] = summarize(result["parsed"]) if result.get("parsed") else None
         self.notifier.notify(offer, ai=record, purchase=purchase)
 
+    async def check_session(self):
+        """Jedno podtrzymanie sesji. Przy utracie: auto-zakup wstrzymany + jeden mail; po powrocie - wznowiony."""
+        async with self._lock:
+            try:
+                alive = await self.account.refresh_and_check()
+            except Exception:
+                log.exception("[AUTO-BUY] Błąd podtrzymania sesji konta - spróbuję przy następnym podejściu.")
+                return
+        if alive and not self.ready:
+            self.ready = True
+            log.warning("[AUTO-BUY] Sesja konta wróciła - auto-zakup WZNOWIONY.")
+            self._alert("[Sniper] Sesja konta Vinted wróciła - auto-zakup wznowiony",
+                        "Sesja konta działa ponownie, auto-zakup jest wznowiony.")
+        elif not alive and self.ready:
+            self.ready = False
+            log.error("[AUTO-BUY] Sesja konta padła - auto-zakup WSTRZYMANY (okazje idą zwykłym mailem). "
+                      "Wklej świeży cURL do my_headers.txt - wgra się sam przy następnym sprawdzeniu.")
+            self._alert("[Sniper] Sesja konta Vinted padła - auto-zakup WSTRZYMANY",
+                        "Zwiadowca nie jest już zalogowany na Twoje konto Vinted, więc NIE kupuje okazji "
+                        "(przychodzą zwykłym mailem).\n\nNaprawa:\n"
+                        "1. Zaloguj się na Vinted w swojej przeglądarce, F12 -> Sieć -> dowolne zapytanie do "
+                        "www.vinted.pl -> Kopiuj jako cURL (bash).\n"
+                        "2. Wklej to do sniper/logs/my_headers.txt i zapisz.\n"
+                        "Zwiadowca wgra nowe ciastka sam przy następnym sprawdzeniu sesji (co "
+                        f"{self.keepalive_min:g} min). Jeśli nie pomoże: zatrzymaj go i uruchom "
+                        "python -m sniper.account_session --reset.")
+
+    def _alert(self, subject, body):
+        if self.notifier is not None and hasattr(self.notifier, "notify_text"):
+            self.notifier.notify_text(subject, body)
+
     async def _keepalive(self):
         interval = max(self.keepalive_min, 1.0) * 60
         while True:
             await asyncio.sleep(interval)
-            async with self._lock:
-                try:
-                    if not await self.account.refresh_and_check():
-                        log.error("[AUTO-BUY] Sesja konta wygasła - zakupy będą się nie udawać. "
-                                  "Wklej świeży cURL do my_headers.txt i zrestartuj Zwiadowcę.")
-                except Exception:
-                    log.exception("[AUTO-BUY] Błąd podtrzymania sesji konta - próbuję dalej.")
+            await self.check_session()

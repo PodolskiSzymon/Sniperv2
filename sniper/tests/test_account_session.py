@@ -137,3 +137,34 @@ def test_is_checkout_url():
     assert acc.VintedAccount._is_checkout_url("https://www.vinted.pl/api/v2/purchases/abc/checkout?x=1") is True
     assert acc.VintedAccount._is_checkout_url("https://www.vinted.pl/api/v2/items/123") is False
     assert acc.VintedAccount._is_checkout_url("") is False
+
+
+def test_seed_only_new_or_changed_headers(tmp_path):
+    """Stary my_headers.txt nie może nadpisywać odświeżonych tokenów profilu przy każdym starcie."""
+    import asyncio
+    import os
+
+    class FakeContext:
+        def __init__(self):
+            self.added = []
+
+        async def add_cookies(self, cookies):
+            self.added.append(cookies)
+
+    account = acc.VintedAccount(AccountConfig(), tmp_path)
+    account.profile_dir.mkdir(parents=True)
+    account.context = FakeContext()
+    account.headers_file.write_text("curl 'https://www.vinted.pl/' -b 'access_token_web=STARY; a=1'",
+                                    encoding="utf-8")
+    assert account.needs_seed() is True
+    asyncio.run(account._seed_cookies())
+    assert len(account.context.added) == 1                              # pierwszy raz: wgrane
+    assert account.needs_seed() is False
+    asyncio.run(account._seed_cookies())
+    assert len(account.context.added) == 1                              # restart: NIE nadpisuje profilu
+    stat = account.headers_file.stat()
+    os.utime(account.headers_file, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10**9))   # świeży cURL
+    assert account.needs_seed() is True
+    account.reset_profile()
+    account.profile_dir.mkdir(parents=True)
+    assert account.needs_seed() is True                                 # po --reset wgrywa od nowa

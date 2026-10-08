@@ -560,8 +560,9 @@ class OfferEvaluator:
         self._finish(offer, record)
 
     def should_notify(self, record):
-        # Tylko maile z auto-zakupu (ten wysyła buyer) - ale wyłącznie gdy buyer naprawdę działa.
-        if getattr(self.cfg, "mail_only_purchases", False) and self.buyer is not None:
+        # Tylko maile z auto-zakupu (ten wysyła buyer) - ale wyłącznie gdy buyer naprawdę działa
+        # (zalogowany). Przy padniętej sesji okazje idą zwykłym mailem, żeby nie przepadły.
+        if getattr(self.cfg, "mail_only_purchases", False) and getattr(self.buyer, "ready", False):
             return False
         if self.cfg.notify_all or record["status"] == STATUS_FAILED:
             return True

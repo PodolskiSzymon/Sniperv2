@@ -184,7 +184,8 @@ def _bare_evaluator(mail_only_purchases, buyer):
 def test_mail_only_purchases_silences_ordinary_offers(tmp_path):
     submitted = []
     ev_of = lambda r: r.get("evaluation") or {}  # noqa: E731
-    buyer = SimpleNamespace(wants=lambda r: bool(ev_of(r).get("is_deal")) and ev_of(r).get("score", 0) >= 8,
+    buyer = SimpleNamespace(ready=True,
+                            wants=lambda r: bool(ev_of(r).get("is_deal")) and ev_of(r).get("score", 0) >= 8,
                             submit=lambda offer, record: submitted.append(offer.id))
     ev = _bare_evaluator(True, buyer)
     offer = make_offer()
@@ -200,3 +201,47 @@ def test_mail_only_purchases_ignored_without_buyer(tmp_path):
     offer = make_offer()
     ev._finish(offer, record_for(offer, score=7, is_deal=False))
     assert len(ev.notifier.mails) == 1                                  # nie gubimy okazji
+
+
+def test_mail_only_purchases_falls_back_when_session_dead(tmp_path):
+    buyer = SimpleNamespace(ready=False, wants=lambda r: False, submit=lambda o, r: None)
+    ev = _bare_evaluator(True, buyer)                                   # buyer jest, ale sesja padła
+    offer = make_offer()
+    ev._finish(offer, record_for(offer, score=9))
+    assert len(ev.notifier.mails) == 1                                  # okazja zwykłym mailem
+
+
+class AlertNotifier(FakeNotifier):
+    def __init__(self):
+        super().__init__()
+        self.alerts = []
+
+    def notify_text(self, subject, body):
+        self.alerts.append(subject)
+
+
+def test_session_loss_pauses_buying_and_alerts_once_then_resumes(tmp_path):
+    account = FakeAccount()
+    buyer, _ = make_buyer(tmp_path, account=account)
+    buyer.notifier = AlertNotifier()
+
+    async def scenario():
+        assert await buyer.start()
+        states = iter([False, False, True])
+
+        async def refresh():
+            return next(states)
+        account.refresh_and_check = refresh
+        await buyer.check_session()
+        dead_after_first = (buyer.ready, list(buyer.notifier.alerts))
+        await buyer.check_session()                                     # dalej martwa - bez drugiego maila
+        dead_after_second = len(buyer.notifier.alerts)
+        await buyer.check_session()                                     # wróciła
+        await buyer.shutdown()
+        return dead_after_first, dead_after_second
+
+    (ready, alerts), count = asyncio.run(scenario())
+    assert ready is False and len(alerts) == 1 and "padła" in alerts[0]
+    assert count == 1
+    assert buyer.ready is True and "wróciła" in buyer.notifier.alerts[-1]
+    assert buyer.wants(record_for(make_offer())) is True
