@@ -513,6 +513,14 @@ class OfferEvaluator:
         self.guidelines = Guidelines(cfg.guidelines_file)
         # AutoBuyer (sniper/autobuy.py) albo None. Okazję do kupienia przejmuje on i sam wysyła mail z wynikiem.
         self.buyer = None
+        # Podgląd ocen w przeglądarce: logs/oceny.html (sniper/report.py).
+        self.report = None
+        if self.log_dir:
+            try:
+                from .report import ReportWriter
+                self.report = ReportWriter(self.log_dir, getattr(cfg, "report_above", 5.0))
+            except Exception as exc:
+                log.warning("[AI] Podgląd ocen (oceny.html) wyłączony: %s", exc)
         self._slots = asyncio.Semaphore(max(cfg.max_concurrent, 1))
         self._tasks = set()
         self.window = _Stats()
@@ -688,6 +696,11 @@ class OfferEvaluator:
                 writer.writerow(self.csv_row(record))
         except OSError as exc:
             log.warning("[AI] Nie zapisałem oceny: %s", exc)
+        if self.report is not None:
+            try:
+                self.report.add(record)
+            except Exception as exc:
+                log.warning("[AI] Nie odświeżyłem oceny.html: %s", exc)
 
     @staticmethod
     def csv_row(record):

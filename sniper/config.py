@@ -238,6 +238,8 @@ class AiConfig:
     # true = mail TYLKO o okazjach, które auto-zakup kupił / próbował kupić (zwykłe oferty i błędy AI bez maila).
     # Działa tylko przy włączonym auto-zakupie - bez niego maile idą jak zwykle, żeby nie zgubić okazji.
     mail_only_purchases: bool = _env_bool("SNIPER_MAIL_ONLY_PURCHASES", False)
+    # Podgląd ocen w przeglądarce (logs/oceny.html): oferty z oceną POWYŻEJ tej wartości.
+    report_above: float = _env_float("SNIPER_AI_REPORT_ABOVE", 5.0)
 
     # Asynchronicznie: limit równoległych wywołań, limit czasu jednej próby, liczba ponowień.
     max_concurrent: int = _env_int("SNIPER_AI_MAX_CONCURRENT", 3)

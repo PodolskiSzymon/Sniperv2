@@ -157,6 +157,13 @@ zaloguj się w nim RĘCZNIE (login, hasło, ewentualny kod), potem naciśnij ENT
 albo „OKAZJA - NIE KUPIONO” z powodem. W heartbeacie: linia `AUTO-BUY: …`. Nie uruchamiaj wtedy osobno
 `python -m sniper.account_session` - Zwiadowca sam podtrzymuje sesję konta.
 
+## Podgląd ocen AI w przeglądarce
+
+`sniper/logs/oceny.html` - otwórz w Edge (dwuklik). Zwiadowca dopisuje tu każdą ofertę z oceną AI powyżej
+`SNIPER_AI_REPORT_ABOVE` (domyślnie 5): ocena, werdykt AI, cena łączna vs maksymalna cena zakupu, wartość rynkowa
+i potencjalny zysk według AI, uzasadnienie, czerwone flagi, zdjęcie. Filtry (okazje / 8+), sortowanie, szukajka;
+strona odświeża się sama co minutę. Odbudowa z całej historii: `python -m sniper.report`.
+
 ## Alerty e-mail
 
 Bez modułu AI każda złapana oferta idzie mailem (z AI – tylko okazje i nieocenione) przez Onet (`smtp.poczta.onet.pl:465`, SSL).
