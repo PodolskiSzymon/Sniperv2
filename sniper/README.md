@@ -146,7 +146,7 @@ python -m sniper.buyer "https://www.vinted.pl/items/XXXX-..." --forget   # usuń
 ```
 
 **Logowanie bota (zalecane)**: `python -m sniper.account_session --login` czyści profil bota i otwiera jego okno -
-zaloguj się w nim RĘCZNIE (login, hasło, ewentualny kod). Bot dostaje własną sesję, którą sam odświeża; `my_headers.txt`
+zaloguj się w nim RĘCZNIE (login, hasło, ewentualny kod), potem naciśnij ENTER w konsoli. Bot dostaje własną sesję, którą sam odświeża; `my_headers.txt`
 (kopia sesji z Twojej przeglądarki) przestaje być używany - taka kopia wygasała po 1-2 h. Nie używaj potem w Vinted
 „wyloguj ze wszystkich urządzeń”, bo zakończy to też sesję bota.
 

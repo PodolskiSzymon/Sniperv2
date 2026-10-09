@@ -137,31 +137,40 @@ class VintedAccount:
     def has_own_login(self):
         return (self.profile_dir / self.OWN_LOGIN_MARKER).exists()
 
-    async def interactive_login(self, timeout_s=600):
-        """Ręczne logowanie w oknie bota (czysty profil). Ty wpisujesz login/hasło/kod - bot tylko czeka.
+    async def interactive_login(self, wait_for_user=None, attempts=5):
+        """Ręczne logowanie w oknie bota (czysty profil): Ty logujesz się w spokoju, potem Enter w konsoli.
 
-        Zwraca True, gdy logowanie potwierdzone (zapisuje znacznik własnego logowania w profilu).
+        Program NIC nie robi w oknie, dopóki nie naciśniesz Enter (wcześniej sprawdzał co kilka sekund
+        i przeładowywał stronę w trakcie logowania). Zwraca True, gdy logowanie potwierdzone - wtedy zapisuje
+        znacznik własnego logowania w profilu. cURL nie jest potrzebny: logowanie zostaje w profilu bota.
         """
-        import time as _t
+        if wait_for_user is None:
+            async def wait_for_user():
+                return await asyncio.get_running_loop().run_in_executor(None, input)
         self._logging_in = True                     # w trakcie logowania NIE wgrywaj my_headers.txt
         await self._launch(headless=False)
         await self.page.goto(HOME_URL, wait_until="domcontentloaded")
         await self._dismiss_consent()
-        log.warning("[KONTO] ZALOGUJ SIĘ RĘCZNIE w otwartym oknie (przycisk „Zaloguj się”). Czekam do %d min...",
-                    timeout_s // 60)
-        deadline = _t.monotonic() + timeout_s
-        while _t.monotonic() < deadline:
-            if await self._has_account_token():
-                await asyncio.sleep(5)              # niech strona dokończy logowanie i przekierowania
-                if await self.refresh_and_check():
-                    (self.profile_dir / self.OWN_LOGIN_MARKER).write_text(
-                        self.username or "zalogowany", encoding="utf-8")
-                    self.logged_in = True
-                    log.warning("[KONTO] Zalogowano w oknie bota jako %s - profil ma teraz WŁASNĄ sesję.",
-                                self.username or "?")
-                    return True
-            await asyncio.sleep(3)
-        log.error("[KONTO] Nie wykryłem zalogowania w ciągu %d min.", timeout_s // 60)
+        print("\n=== LOGOWANIE BOTA ===\n"
+              "1. W otwartym oknie kliknij „Zaloguj się” i zaloguj się normalnie (e-mail, hasło, kod).\n"
+              "2. Gdy zobaczysz swoje konto (awatar w prawym górnym rogu), wróć tutaj i naciśnij ENTER.\n"
+              "   (q + Enter = przerwij)")
+        for attempt in range(1, attempts + 1):
+            answer = (await wait_for_user() or "").strip().lower()
+            if answer == "q":
+                print("Przerwano.")
+                return False
+            print("Sprawdzam logowanie...")
+            if await self.refresh_and_check():
+                (self.profile_dir / self.OWN_LOGIN_MARKER).write_text(
+                    self.username or "zalogowany", encoding="utf-8")
+                self.logged_in = True
+                log.warning("[KONTO] Zalogowano w oknie bota jako %s - profil ma teraz WŁASNĄ sesję.",
+                            self.username or "?")
+                return True
+            print(f"Nie widzę zalogowania (próba {attempt}/{attempts}). Dokończ logowanie w oknie "
+                  "(strona mogła się przeładować - zaloguj się jeszcze raz) i naciśnij ENTER. q = przerwij.")
+        log.error("[KONTO] Nie potwierdziłem zalogowania po %d próbach.", attempts)
         return False
 
     def _headers_stamp(self):
@@ -235,9 +244,10 @@ class VintedAccount:
         login_button = await self._login_button_visible()
         has_token = await self._has_account_token()
         if login_button or has_token is False:
-            log.warning("[KONTO] NIE jesteś zalogowany (%s). Wklej świeży cURL do %s.",
-                        "na stronie jest „Zaloguj się”" if login_button else "brak ciastka access_token_web",
-                        self.headers_file.name)
+            if not self._logging_in:
+                log.warning("[KONTO] NIE jesteś zalogowany (%s). Zaloguj bota: python -m sniper.account_session "
+                            "--login", "na stronie jest „Zaloguj się”" if login_button
+                            else "brak ciastka access_token_web")
             self.username = None
             return False
         log.info("[KONTO] Sesja aktywna (banner bez nazwy, ale bez „Zaloguj się” i z tokenem konta).")
