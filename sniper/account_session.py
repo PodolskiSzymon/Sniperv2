@@ -152,7 +152,9 @@ class VintedAccount:
         await self.page.goto(HOME_URL, wait_until="domcontentloaded")
         await self._dismiss_consent()
         print("\n=== LOGOWANIE BOTA ===\n"
-              "1. W otwartym oknie kliknij „Zaloguj się” i zaloguj się normalnie (e-mail, hasło, kod).\n"
+              "1. W otwartym oknie kliknij „Zaloguj się” i wybierz logowanie E-MAILEM i HASŁEM Vinted.\n"
+              "   NIE „Kontynuuj z Google/Facebook/Apple” - Google blokuje logowanie w przeglądarce sterowanej\n"
+              "   przez program. Nie masz hasła do Vinted? „Nie pamiętasz hasła?” -> ustaw je linkiem z maila.\n"
               "2. Gdy zobaczysz swoje konto (awatar w prawym górnym rogu), wróć tutaj i naciśnij ENTER.\n"
               "   (q + Enter = przerwij)")
         for attempt in range(1, attempts + 1):
