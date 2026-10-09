@@ -3,7 +3,8 @@
 Przepływ docelowy:
   ocena AI >= próg  ->  bot otwiera ofertę  ->  'Kup teraz'  ->  ekran checkout
   ->  parse_checkout()  ->  decide_purchase() sprawdza TWARDE limity
-  ->  realny zakup: wywołanie auto-kliknięcia 'Zapłać' -> człowiek rozwiązuje captchę.
+  ->  klik 'Zapłać' (czeka na załadowanie checkoutu, ponawia) -> captchę / potwierdzenie banku robi człowiek
+      w otwartym oknie przeglądarki (program jej nie zamyka).
 """
 import json
 import logging
@@ -72,10 +73,27 @@ class PurchaseLedger:
                         pass
         return rows
 
-    CONSUMED = ("ready", "bought")
+    # 'pay_unconfirmed' = klik 'Zapłać' bez potwierdzenia reakcji - mogło przejść, więc też blokuje ponowny zakup.
+    CONSUMED = ("ready", "bought", "pay_unconfirmed")
+
+    def find(self, item_id):
+        """Ostatni wpis 'zajmujący' tę ofertę (albo None)."""
+        rows = [r for r in self._rows if r.get("status") in self.CONSUMED and str(r.get("item_id")) == str(item_id)]
+        return rows[-1] if rows else None
 
     def already_bought(self, item_id):
-        return any(r.get("status") in self.CONSUMED and str(r.get("item_id")) == str(item_id) for r in self._rows)
+        return self.find(item_id) is not None
+
+    def forget(self, item_id):
+        """Usuwa z rejestru wpisy 'zajmujące' tę ofertę (np. fałszywe 'bought'). Zwraca liczbę usuniętych."""
+        keep = [r for r in self._rows
+                if not (r.get("status") in self.CONSUMED and str(r.get("item_id")) == str(item_id))]
+        removed = len(self._rows) - len(keep)
+        if removed:
+            self._rows = keep
+            if self.path:
+                self.path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in keep), encoding="utf-8")
+        return removed
 
     def count_on(self, day):
         return sum(1 for r in self._rows if r.get("status") in self.CONSUMED and r.get("local_date") == day.isoformat())
@@ -121,8 +139,10 @@ def decide_purchase(parsed, cfg: BuyerConfig, ledger, offer=None):
         return False, f"waluta {parsed.get('currency')} != PLN"
     if total > cfg.max_total_pln:
         return False, f"suma {total:.2f} > limit {cfg.max_total_pln:.0f} zł (SNIPER_BUY_MAX_TOTAL)"
-    if ledger.already_bought(parsed["item_id"]):
-        return False, "ta oferta już kupiona (rejestr bought.jsonl)"
+    previous = ledger.find(parsed["item_id"])
+    if previous:
+        return False, (f"ta oferta jest już w rejestrze bought.jsonl (status '{previous.get('status')}' z "
+                       f"{(previous.get('ts') or '?')[:16]}) - jeśli to pomyłka, uruchom z --forget")
     done = ledger.count_today()
     if done >= cfg.max_per_day:
         return False, f"limit {cfg.max_per_day} zakupów na dobę osiągnięty ({done})"
@@ -167,19 +187,20 @@ async def attempt_purchase(nav, url, offer, cfg: BuyerConfig, ledger):
         await nav.focus()
     except Exception:
         pass
-    
-    log.warning("[BUY] LIMITI ZAAKCEPTOWANE: %s | %s. Odpalam auto-zakup...", summarize(parsed), reason)
 
-    # WŁAŚCIWY MOMENT NA KLIKNIĘCIE ZAPŁAĆ
+    log.warning("[BUY] LIMITY ZAAKCEPTOWANE: %s | %s. Klikam 'Zapłać'...", summarize(parsed), reason)
     try:
-        await nav.finalize_purchase(nav.page)
-        ledger.record(parsed, "bought", reason)
-        log.warning("[BUY] AUTO-ZAKUP WYKONANY! Przycisk 'Zapłać' kliknięty. Przejdź do okna i przesuń suwak (jeśli jest).")
-        return {"status": "bought", "reason": reason, "parsed": parsed}
+        reaction = await nav.finalize_purchase(nav.page)
     except Exception as exc:
-        log.error("[BUY] Błąd podczas klikania 'Zapłać': %s", exc)
-        ledger.record(parsed, "error", str(exc))
-        return {"status": "error", "reason": str(exc), "parsed": parsed}
+        # Nie wiemy na pewno, czy płatność nie ruszyła - 'pay_unconfirmed' blokuje ponowny zakup tej oferty.
+        log.error("[BUY] 'Zapłać' nie potwierdzone: %s. Sprawdź okno przeglądarki.", exc)
+        ledger.record(parsed, "pay_unconfirmed", str(exc))
+        return {"status": "pay_unconfirmed", "reason": str(exc), "parsed": parsed}
+
+    ledger.record(parsed, "bought", reason)
+    log.warning("[BUY] 'Zapłać' kliknięte (%s). Dokończ w otwartym oknie przeglądarki (suwak / potwierdzenie banku).",
+                reaction)
+    return {"status": "bought", "reason": reason, "parsed": parsed}
 
 
 async def _cli(argv=None):
@@ -194,6 +215,8 @@ async def _cli(argv=None):
     parser.add_argument("url", help="link do oferty na Vinted")
     parser.add_argument("--max", type=float, help="nadpisz limit sumy (PLN) na ten test")
     parser.add_argument("--ignore-limits", action="store_true", help="pomiń limity (tylko do testu)")
+    parser.add_argument("--forget", action="store_true",
+                        help="usuń tę ofertę z rejestru bought.jsonl (gdy wpis 'kupione' jest fałszywy)")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -207,6 +230,14 @@ async def _cli(argv=None):
         buy_cfg = replace(buy_cfg, max_total_pln=10**9, max_per_day=10**9, pl_only=False, min_score=0.0)
 
     ledger = PurchaseLedger(cfg.log_dir)
+    if args.forget:
+        import re
+        match = re.search(r"/items/(\d+)", args.url)
+        if not match:
+            print("--forget: nie odczytałem ID oferty z linku (oczekuję .../items/123456-...).")
+            return 1
+        removed = ledger.forget(match.group(1))
+        print(f"Usunąłem z rejestru bought.jsonl {removed} wpis(ów) oferty {match.group(1)}.")
     account = VintedAccount(cfg.account, cfg.log_dir)
     try:
         await account.start()
@@ -214,12 +245,17 @@ async def _cli(argv=None):
             print("Nie potwierdziłem zalogowania - sprawdź my_headers.txt (świeży cURL) i spróbuj --reset.")
             return 1
         print(f"Zalogowany jako {account.username}. Przygotowuję auto-zakup: {args.url}")
-        result = await attempt_purchase(account, args.url, None, buy_cfg, ledger)
+        try:
+            result = await attempt_purchase(account, args.url, None, buy_cfg, ledger)
+        except Exception as exc:
+            log.exception("[BUY] Nieoczekiwany błąd auto-zakupu")
+            result = {"status": "error", "reason": str(exc)}
         print(f"\nWynik: {result['status']} - {result['reason']}")
         if result["status"] == "bought":
-            print("Skrypt kliknął 'ZAPŁAĆ'. Sprawdź otwarte okno przeglądarki, by rozwiązać captchę!")
-            print("Potem Enter tutaj, żeby zamknąć program.")
-            await asyncio.get_event_loop().run_in_executor(None, input)
+            print("Skrypt kliknął 'ZAPŁAĆ'. Dokończ w otwartym oknie przeglądarki (suwak / potwierdzenie banku).")
+        # Okno zostaje otwarte niezależnie od wyniku - zamknięcie przerwałoby płatność / captchę w toku.
+        print("Przeglądarka zostaje otwarta. Enter tutaj zamyka program (dopiero po zakończeniu płatności!).")
+        await asyncio.get_running_loop().run_in_executor(None, input)
     finally:
         await account.close()
     return 0

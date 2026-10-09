@@ -133,7 +133,36 @@ zawsze zostają po Twojej stronie.
 **Krok 3 - auto-zakup (`sniper/buyer.py`)**: przy ofercie z oceną >= `SNIPER_BUY_MIN_SCORE` bot przez sesję
 konta otwiera ofertę, klika „Kup teraz”, czyta checkout (`/api/v2/purchases/{id}/checkout`) i sprawdza twarde
 limity: suma <= `SNIPER_BUY_MAX_TOTAL`, max `SNIPER_BUY_MAX_PER_DAY` na dobę, tylko PL (`SNIPER_BUY_PL_ONLY`),
-trzeba dodać mechanizm płacenia automatycznego (regulamin na to zezwala).
+nie kupuje dwa razy tej samej (rejestr `logs/bought.jsonl`). Gdy limity przechodzą, bot czeka na pełne
+załadowanie ekranu płatności (jak przy „Kup teraz”: networkidle + aktywny przycisk), przy wysyłce do punktu
+wybiera punkt („Wybierz punkt odbioru” → „Potwierdź”), klika „Zapłać”, sprawdza
+reakcję strony i w razie ślepego kliku ponawia (max 3 razy; zrzut `logs/checkout_error.png` przy porażce).
+Captchę / potwierdzenie banku dokańczasz Ty w otwartym oknie - program go nie zamyka.
+
+```bash
+python -m sniper.buyer "https://www.vinted.pl/items/XXXX-..."       # limity z .env - PŁACI!
+python -m sniper.buyer "https://www.vinted.pl/items/XXXX-..." --max 30   # test na tanim przedmiocie
+python -m sniper.buyer "https://www.vinted.pl/items/XXXX-..." --forget   # usuń fałszywy wpis z bought.jsonl i spróbuj
+```
+
+**Logowanie bota (zalecane)**: `python -m sniper.account_session --login` czyści profil bota i otwiera jego okno -
+zaloguj się w nim RĘCZNIE (login, hasło, ewentualny kod), potem naciśnij ENTER w konsoli. Bot dostaje własną sesję, którą sam odświeża; `my_headers.txt`
+(kopia sesji z Twojej przeglądarki) przestaje być używany - taka kopia wygasała po 1-2 h. Nie używaj potem w Vinted
+„wyloguj ze wszystkich urządzeń”, bo zakończy to też sesję bota.
+
+**Krok 4 - auto-zakup w Zwiadowcy (`sniper/autobuy.py`)**: przy `SNIPER_BUY_ENABLED=true` (i działającej ocenie AI)
+`python -m sniper` uruchamia też zalogowaną przeglądarkę konta. Gdy AI uzna ofertę za okazję z oceną
+>= `SNIPER_BUY_MIN_SCORE`, bot od razu ją kupuje (te same limity co wyżej, jeden zakup naraz) i wysyła mail z wynikiem:
+„KUPIONE … - sprawdź / anuluj” (link do wiadomości Vinted, gdzie możesz anulować), „ZAKUP NIEPOTWIERDZONY”
+albo „OKAZJA - NIE KUPIONO” z powodem. W heartbeacie: linia `AUTO-BUY: …`. Nie uruchamiaj wtedy osobno
+`python -m sniper.account_session` - Zwiadowca sam podtrzymuje sesję konta.
+
+## Podgląd ocen AI w przeglądarce
+
+`sniper/logs/oceny.html` - otwórz w Edge (dwuklik). Zwiadowca dopisuje tu każdą ofertę z oceną AI powyżej
+`SNIPER_AI_REPORT_ABOVE` (domyślnie 5): ocena, werdykt AI, cena łączna vs maksymalna cena zakupu, wartość rynkowa
+i potencjalny zysk według AI, uzasadnienie, czerwone flagi, zdjęcie. Filtry (okazje / 8+), sortowanie, szukajka;
+strona odświeża się sama co minutę. Odbudowa z całej historii: `python -m sniper.report`.
 
 ## Alerty e-mail
 

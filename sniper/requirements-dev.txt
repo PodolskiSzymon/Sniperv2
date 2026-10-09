@@ -1,0 +1,3 @@
+# Dodatkowo do uruchamiania testów: python -m pytest sniper/tests
+-r requirements.txt
+pytest>=8.0

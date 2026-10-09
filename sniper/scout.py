@@ -59,12 +59,14 @@ def _to_float(value):
 
 
 class Scout:
-    def __init__(self, cfg: ScoutConfig, session: VintedSession, notifier: EmailNotifier, evaluator=None):
+    def __init__(self, cfg: ScoutConfig, session: VintedSession, notifier: EmailNotifier, evaluator=None, buyer=None):
         self.cfg = cfg
         self.session = session
         self.notifier = notifier
         # OfferEvaluator (sniper/evaluator.py) albo None = mail o każdej ofercie, jak przed modułem AI.
         self.evaluator = evaluator
+        # AutoBuyer (sniper/autobuy.py) albo None - tu tylko do heartbeatu (okazje dostaje od evaluatora).
+        self.buyer = buyer
         floor = min_dedup(cfg.per_page)
         if cfg.dedup_size < floor:
             log.warning("[SCOUT] SNIPER_DEDUP_SIZE=%d to za mało przy stronie %d ofert - używam %d.",
@@ -265,6 +267,8 @@ class Scout:
                          item_url(it.get("id"), it))
         if self.evaluator:
             log.info("[SCOUT] %s", self.evaluator.window_report())
+        if self.buyer:
+            log.info("[SCOUT] %s", self.buyer.report())
         text, row = self.session.traffic.window_report()
         log.info("[SCOUT] %s", text)
         self._save_traffic(row)

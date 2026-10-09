@@ -511,6 +511,16 @@ class OfferEvaluator:
         self.backend = make_backend(cfg, client)
         self.client = self.backend.client
         self.guidelines = Guidelines(cfg.guidelines_file)
+        # AutoBuyer (sniper/autobuy.py) albo None. Okazję do kupienia przejmuje on i sam wysyła mail z wynikiem.
+        self.buyer = None
+        # Podgląd ocen w przeglądarce: logs/oceny.html (sniper/report.py).
+        self.report = None
+        if self.log_dir:
+            try:
+                from .report import ReportWriter
+                self.report = ReportWriter(self.log_dir, getattr(cfg, "report_above", 5.0))
+            except Exception as exc:
+                log.warning("[AI] Podgląd ocen (oceny.html) wyłączony: %s", exc)
         self._slots = asyncio.Semaphore(max(cfg.max_concurrent, 1))
         self._tasks = set()
         self.window = _Stats()
@@ -558,11 +568,24 @@ class OfferEvaluator:
         self._finish(offer, record)
 
     def should_notify(self, record):
+        # Tylko maile z auto-zakupu (ten wysyła buyer) - ale wyłącznie gdy buyer naprawdę działa
+        # (zalogowany). Przy padniętej sesji okazje idą zwykłym mailem, żeby nie przepadły.
+        if getattr(self.cfg, "mail_only_purchases", False) and getattr(self.buyer, "ready", False):
+            return False
         if self.cfg.notify_all or record["status"] == STATUS_FAILED:
             return True
         return record["status"] == STATUS_EVALUATED and record["evaluation"]["score"] >= self.cfg.min_score
 
     def _finish(self, offer, record):
+        if self.buyer is not None and self.buyer.wants(record):
+            # Zakup najpierw, mail dopiero z jego wynikiem (jeden mail: „KUPIONE…” albo „NIE KUPIONO…”).
+            record["notified"] = bool(self.notifier)
+            record["auto_buy"] = True
+            self.save(record)
+            if record["notified"]:
+                self._count("notified")
+            self.buyer.submit(offer, record)
+            return
         record["notified"] = bool(self.notifier) and self.should_notify(record)
         self.save(record)
         if record["notified"]:
@@ -673,6 +696,11 @@ class OfferEvaluator:
                 writer.writerow(self.csv_row(record))
         except OSError as exc:
             log.warning("[AI] Nie zapisałem oceny: %s", exc)
+        if self.report is not None:
+            try:
+                self.report.add(record)
+            except Exception as exc:
+                log.warning("[AI] Nie odświeżyłem oceny.html: %s", exc)
 
     @staticmethod
     def csv_row(record):

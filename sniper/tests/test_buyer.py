@@ -113,7 +113,7 @@ def test_ledger_blocks_duplicate_and_counts_daily(tmp_path):
     assert ledger.count_today() == 1
 
     ok, reason = decide_purchase(parsed, cfg(), ledger, offer())
-    assert ok is False and "już kupiona" in reason
+    assert ok is False and "już w rejestrze" in reason
 
 
 def test_ledger_daily_limit_blocks(tmp_path):
@@ -153,11 +153,13 @@ from sniper.buyer import attempt_purchase  # noqa: E402
 
 
 class FakeNav:
-    """Atrapa przeglądarki - NIE ma metody pay(): bot nigdy nie płaci."""
+    """Atrapa przeglądarki (VintedAccount): otwiera ofertę, klika 'Kup teraz' i 'Zapłać'."""
 
-    def __init__(self, payload=CHECKOUT, fail_checkout=False):
+    def __init__(self, payload=CHECKOUT, fail_checkout=False, fail_pay=False):
         self.payload = payload
         self.fail_checkout = fail_checkout
+        self.fail_pay = fail_pay
+        self.page = "checkout-page"
         self.calls = []
 
     async def open(self, url):
@@ -172,22 +174,37 @@ class FakeNav:
     async def focus(self):
         self.calls.append(("focus",))
 
+    async def finalize_purchase(self, page):
+        self.calls.append(("pay", page))
+        if self.fail_pay:
+            raise RuntimeError("klik 'Zapłać' 3 razy bez reakcji strony")
+        return "przycisk 'Zapłać' zniknął"
 
-def test_attempt_ready_prepares_checkout_but_never_pays(tmp_path):
+
+def test_attempt_pays_when_limits_ok(tmp_path):
     nav, ledger = FakeNav(), PurchaseLedger(tmp_path)
     result = asyncio.run(attempt_purchase(nav, "url", offer(), cfg(), ledger))
-    assert result["status"] == "ready"
-    assert [c[0] for c in nav.calls] == ["open", "buy_now", "focus"]
-    assert not hasattr(nav, "pay")                              # w atrapie nie ma płacenia
-    assert ledger.already_bought("10225109576") is True        # 'ready' blokuje ponowne przygotowanie
+    assert result["status"] == "bought"
+    assert [c[0] for c in nav.calls] == ["open", "buy_now", "focus", "pay"]
+    assert ("pay", "checkout-page") in nav.calls                # klika na stronie checkout
+    assert ledger.already_bought("10225109576") is True
     assert ledger.count_today() == 1
+
+
+def test_attempt_unconfirmed_pay_blocks_rebuy(tmp_path):
+    nav, ledger = FakeNav(fail_pay=True), PurchaseLedger(tmp_path)
+    result = asyncio.run(attempt_purchase(nav, "url", offer(), cfg(), ledger))
+    assert result["status"] == "pay_unconfirmed" and "bez reakcji" in result["reason"]
+    # Klik mógł jednak przejść - nie próbujemy kupić tej samej oferty drugi raz, liczy się do limitu dobowego.
+    assert ledger.already_bought("10225109576") is True and ledger.count_today() == 1
 
 
 def test_attempt_skips_over_limit_and_does_not_prepare(tmp_path):
     nav, ledger = FakeNav(), PurchaseLedger(tmp_path)
     result = asyncio.run(attempt_purchase(nav, "url", offer(), cfg(max_total_pln=5.0), ledger))
     assert result["status"] == "skipped" and "limit" in result["reason"]
-    assert ("focus",) not in nav.calls and ledger.already_bought("10225109576") is False
+    assert ("focus",) not in nav.calls and not any(c[0] == "pay" for c in nav.calls)
+    assert ledger.already_bought("10225109576") is False
 
 
 def test_attempt_skips_foreign_seller(tmp_path):
@@ -200,6 +217,7 @@ def test_attempt_handles_checkout_error(tmp_path):
     nav, ledger = FakeNav(fail_checkout=True), PurchaseLedger(tmp_path)
     result = asyncio.run(attempt_purchase(nav, "url", offer(), cfg(), ledger))
     assert result["status"] == "error" and ("focus",) not in nav.calls
+    assert not any(c[0] == "pay" for c in nav.calls)
 
 
 def test_cli_requires_url():
@@ -211,3 +229,16 @@ def test_cli_requires_url():
 async def attempt_cli_noargs():
     from sniper.buyer import _cli
     return await _cli([])
+
+
+def test_ledger_forget_removes_false_entry(tmp_path):
+    ledger = PurchaseLedger(tmp_path)
+    parsed = parse_checkout(CHECKOUT)
+    ledger.record(parsed, "bought")
+    ledger.record(parsed, "skipped", "x")
+    ok, reason = decide_purchase(parsed, cfg(), ledger)
+    assert not ok and "status 'bought'" in reason and "--forget" in reason
+    assert ledger.forget("10225109576") == 1
+    assert PurchaseLedger(tmp_path).already_bought("10225109576") is False      # zapisane na dysku
+    assert len(PurchaseLedger(tmp_path)._rows) == 1                            # 'skipped' zostaje
+    assert decide_purchase(parsed, cfg(), PurchaseLedger(tmp_path))[0] is True

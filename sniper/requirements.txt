@@ -1,6 +1,10 @@
-httpx>=0.26
-aiosmtplib>=3.0
-playwright>=1.40
-python-dotenv>=1.0
-anthropic>=1.0
-google-genai>=2.0
+# Biblioteki potrzebne do uruchomienia sniper (Python 3.12).
+# Instalacja:   pip install -r sniper/requirements.txt
+# Potem raz:    python -m playwright install chromium
+httpx>=0.26            # zapytania do Vinted przez proxy
+aiosmtplib>=3.0        # wysyłka maili (SMTP Onet)
+playwright>=1.40       # przeglądarka (sesja Zwiadowcy, konto)
+python-dotenv>=1.0     # wczytywanie sniper/.env
+anthropic>=1.0         # ocena AI - Claude (SNIPER_AI_PROVIDER=anthropic)
+google-genai>=2.0      # ocena AI - Gemini (SNIPER_AI_PROVIDER=gemini)
+requests>=2.31         # narzędzie diagnostyczne (python -m sniper.diagnose)

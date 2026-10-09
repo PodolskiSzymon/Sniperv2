@@ -137,3 +137,160 @@ def test_is_checkout_url():
     assert acc.VintedAccount._is_checkout_url("https://www.vinted.pl/api/v2/purchases/abc/checkout?x=1") is True
     assert acc.VintedAccount._is_checkout_url("https://www.vinted.pl/api/v2/items/123") is False
     assert acc.VintedAccount._is_checkout_url("") is False
+
+
+def test_seed_only_new_or_changed_headers(tmp_path):
+    """Stary my_headers.txt nie może nadpisywać odświeżonych tokenów profilu przy każdym starcie."""
+    import asyncio
+    import os
+
+    class FakeContext:
+        def __init__(self):
+            self.added = []
+
+        async def add_cookies(self, cookies):
+            self.added.append(cookies)
+
+    account = acc.VintedAccount(AccountConfig(), tmp_path)
+    account.profile_dir.mkdir(parents=True)
+    account.context = FakeContext()
+    account.headers_file.write_text("curl 'https://www.vinted.pl/' -b 'access_token_web=STARY; a=1'",
+                                    encoding="utf-8")
+    assert account.needs_seed() is True
+    asyncio.run(account._seed_cookies())
+    assert len(account.context.added) == 1                              # pierwszy raz: wgrane
+    assert account.needs_seed() is False
+    asyncio.run(account._seed_cookies())
+    assert len(account.context.added) == 1                              # restart: NIE nadpisuje profilu
+    stat = account.headers_file.stat()
+    os.utime(account.headers_file, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10**9))   # świeży cURL
+    assert account.needs_seed() is True
+    account.reset_profile()
+    account.profile_dir.mkdir(parents=True)
+    assert account.needs_seed() is True                                 # po --reset wgrywa od nowa
+
+
+def test_start_reseeds_when_profile_not_logged_in(tmp_path, monkeypatch):
+    """Profil bez ważnej sesji + pominięte ciastka -> start wgrywa je jeszcze raz i sprawdza ponownie."""
+    import asyncio
+    account = acc.VintedAccount(AccountConfig(), tmp_path)
+    account.profile_dir.mkdir(parents=True)
+    account.headers_file.write_text("curl 'https://www.vinted.pl/' -b 'a=1'", encoding="utf-8")
+    (account.profile_dir / account.SEED_MARKER).write_text(account._headers_stamp(), encoding="utf-8")
+    seeds, checks = [], iter([False, True])
+
+    class FakeCtx:
+        pages = ["strona"]
+
+        def set_default_navigation_timeout(self, ms):
+            pass
+
+        async def add_cookies(self, cookies):
+            seeds.append(cookies)
+
+    class FakeChromium:
+        async def launch_persistent_context(self, path, **kw):
+            return FakeCtx()
+
+    class FakePW:
+        chromium = FakeChromium()
+
+        async def start(self):
+            return self
+
+    import playwright.async_api as pwa
+    monkeypatch.setattr(pwa, "async_playwright", lambda: FakePW())
+
+    async def fake_check():
+        return next(checks)
+    monkeypatch.setattr(account, "refresh_and_check", fake_check)
+    asyncio.run(account.start())
+    assert len(seeds) == 1 and account.logged_in is True     # pominięte przy starcie, wgrane po porażce
+
+
+class _Loc:
+    def __init__(self, visible):
+        self._visible = visible
+
+    async def count(self):
+        return 1 if self._visible is not None else 0
+
+    def nth(self, i):
+        return self
+
+    async def is_visible(self):
+        return bool(self._visible)
+
+
+class GuestPage(FakePage):
+    """Strona jak dla gościa: banners 200/code:0 bez nazwy, ale w nagłówku „Zaloguj się”."""
+    def __init__(self, login_visible):
+        super().__init__({"status": 200, "body": '{"banners":{},"code":0}'})
+        self._login_visible = login_visible
+
+    async def wait_for_load_state(self, state, timeout=None):
+        return None
+
+    def get_by_text(self, pattern):
+        return _Loc(self._login_visible)
+
+
+class _Ctx:
+    def __init__(self, cookies):
+        self._cookies = cookies
+
+    async def cookies(self, url=None):
+        return self._cookies
+
+
+def test_banners_ok_but_login_button_means_logged_out(tmp_path):
+    import asyncio
+    account = acc.VintedAccount(AccountConfig(), tmp_path)
+    account.page = GuestPage(login_visible=True)
+    assert asyncio.run(account.refresh_and_check()) is False        # fałszywe „Sesja aktywna” z logu użytkownika
+
+
+def test_banners_ok_without_account_token_means_logged_out(tmp_path):
+    import asyncio
+    account = acc.VintedAccount(AccountConfig(), tmp_path)
+    account.page = GuestPage(login_visible=None)
+    account.context = _Ctx([{"name": "anon_id", "value": "x"}])
+    account.headers_file = tmp_path / "brak.txt"                      # needs_seed() = False
+    assert asyncio.run(account.refresh_and_check()) is False
+
+
+def test_banners_ok_with_token_and_no_login_button_is_logged_in(tmp_path):
+    import asyncio
+    account = acc.VintedAccount(AccountConfig(), tmp_path)
+    account.page = GuestPage(login_visible=False)
+    account.context = _Ctx([{"name": "access_token_web", "value": "tok"}])
+    account.headers_file = tmp_path / "brak.txt"
+    assert asyncio.run(account.refresh_and_check()) is True
+
+
+def test_own_login_never_uses_my_headers(tmp_path):
+    """Po --login bot ma własną sesję: my_headers.txt (kopia z Edge) nie może jej nadpisać - ani przy starcie,
+    ani przy awaryjnym ponownym wgraniu."""
+    import asyncio
+    account = acc.VintedAccount(AccountConfig(), tmp_path)
+    account.profile_dir.mkdir(parents=True)
+    account.headers_file.write_text("curl 'https://www.vinted.pl/' -b 'access_token_web=KOPIA'", encoding="utf-8")
+    assert account.needs_seed() is True
+    (account.profile_dir / account.OWN_LOGIN_MARKER).write_text("szymooon_koala", encoding="utf-8")
+    assert account.has_own_login() and account.needs_seed() is False
+
+    class Ctx:
+        added = []
+
+        async def add_cookies(self, cookies):
+            self.added.append(cookies)
+    account.context = Ctx()
+    assert asyncio.run(account._seed_cookies(force=True)) == ([], None) and Ctx.added == []
+
+
+def test_no_seeding_while_logging_in(tmp_path):
+    account = acc.VintedAccount(AccountConfig(), tmp_path)
+    account.profile_dir.mkdir(parents=True)
+    account.headers_file.write_text("curl 'https://www.vinted.pl/' -b 'a=1'", encoding="utf-8")
+    account._logging_in = True
+    assert account.needs_seed() is False
