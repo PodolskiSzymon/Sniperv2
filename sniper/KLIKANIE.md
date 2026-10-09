@@ -1,9 +1,5 @@
 # Jak robić automatyczne klikanie w Vinted (na podstawie outerHTML z F12)
 
-> **Uwaga (2026-10-09):** Vinted wykrył sterowaną przeglądarkę i zablokował sesję („zautomatyzowana
-> aktywność”). Auto-zakup jest wstrzymany i NIE obchodzimy wykrywania automatów (bez stealth, podmiany
-> fingerprintu, captchy, auto-klikania na telefonie) – szczegóły w `CLAUDE.md`, sekcja „Zabezpieczenia Vinted”.
-
 Krótka instrukcja dla kolejnego czatu. Wzorzec sprawdzony na przycisku „Kup teraz” → checkout
 (`sniper/account_session.py`, `sniper/buyer.py`). Sterujemy prawdziwą przeglądarką przez Playwright,
 z zalogowanej sesji konta (bez proxy). **Bot klika „Zapłać”**
