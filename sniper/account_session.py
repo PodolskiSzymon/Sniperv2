@@ -70,6 +70,7 @@ class VintedAccount:
         self.page = None
         self.username = None
         self.logged_in = False
+        self._logging_in = False
 
     def clear_profile_locks(self):
         """Usuwa pliki-blokady Chromium z profilu (zostają po niedokończonym zamknięciu)."""
@@ -86,13 +87,18 @@ class VintedAccount:
             log.info("[KONTO] Usunąłem blokady profilu: %s", ", ".join(removed))
 
     async def start(self):
+        await self._launch()
+        return await self._after_launch()
+
+    async def _launch(self, headless=None):
         from playwright.async_api import async_playwright
 
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         self.clear_profile_locks()
         self._pw = await async_playwright().start()
         # Trwały profil => sesja przeżywa restart programu. BEZ proxy (proxy=None) - domowe IP.
-        launch_kwargs = dict(headless=self.cfg.headless, proxy=None, viewport=self.cfg.viewport_size)
+        launch_kwargs = dict(headless=self.cfg.headless if headless is None else headless, proxy=None,
+                             viewport=self.cfg.viewport_size)
         if self.cfg.chrome_path:
             launch_kwargs["executable_path"] = self.cfg.chrome_path
         try:
@@ -105,13 +111,15 @@ class VintedAccount:
                 f"--reset' (wyczyści profil - trzeba będzie wkleić świeży cURL). Szczegół: {exc}"
             ) from exc
         self.context.set_default_navigation_timeout(self.cfg.nav_timeout * 1000)
-        seeded, _ = await self._seed_cookies()
         self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
         vp = self.cfg.viewport_size
-        log.info("[KONTO] Przeglądarka uruchomiona (profil: %s, headless=%s, okno %dx%d px, bez proxy).",
-                 self.profile_dir, self.cfg.headless, vp["width"], vp["height"])
+        log.info("[KONTO] Przeglądarka uruchomiona (profil: %s, okno %dx%d px, bez proxy).",
+                 self.profile_dir, vp["width"], vp["height"])
+
+    async def _after_launch(self):
+        seeded, _ = await self._seed_cookies()
         self.logged_in = await self.refresh_and_check()
-        if not self.logged_in and not seeded and self.headers_file.exists():
+        if not self.logged_in and not seeded and not self.has_own_login() and self.headers_file.exists():
             # Profil bez ważnej sesji - spróbuj jeszcze ciastek z pliku (tak jak przed ograniczeniem wgrywania).
             log.warning("[KONTO] Profil niezalogowany - wgrywam ponownie ciastka z %s i sprawdzam jeszcze raz.",
                         self.headers_file.name)
@@ -121,6 +129,40 @@ class VintedAccount:
 
     # Znacznik w profilu: który my_headers.txt (czas modyfikacji) już wgraliśmy.
     SEED_MARKER = "sniper_seeded_headers.txt"
+    # Znacznik w profilu: bot ma WŁASNE logowanie (python -m sniper.account_session --login) -> my_headers.txt
+    # nie jest używany. Kopia sesji z Twojej przeglądarki (ten sam sid, cudze cf_clearance/datadome) nie umiała się
+    # odświeżyć - bot żył tylko do wygaśnięcia skopiowanego tokenu (test 2026-10-08/09).
+    OWN_LOGIN_MARKER = "sniper_own_login.txt"
+
+    def has_own_login(self):
+        return (self.profile_dir / self.OWN_LOGIN_MARKER).exists()
+
+    async def interactive_login(self, timeout_s=600):
+        """Ręczne logowanie w oknie bota (czysty profil). Ty wpisujesz login/hasło/kod - bot tylko czeka.
+
+        Zwraca True, gdy logowanie potwierdzone (zapisuje znacznik własnego logowania w profilu).
+        """
+        import time as _t
+        self._logging_in = True                     # w trakcie logowania NIE wgrywaj my_headers.txt
+        await self._launch(headless=False)
+        await self.page.goto(HOME_URL, wait_until="domcontentloaded")
+        await self._dismiss_consent()
+        log.warning("[KONTO] ZALOGUJ SIĘ RĘCZNIE w otwartym oknie (przycisk „Zaloguj się”). Czekam do %d min...",
+                    timeout_s // 60)
+        deadline = _t.monotonic() + timeout_s
+        while _t.monotonic() < deadline:
+            if await self._has_account_token():
+                await asyncio.sleep(5)              # niech strona dokończy logowanie i przekierowania
+                if await self.refresh_and_check():
+                    (self.profile_dir / self.OWN_LOGIN_MARKER).write_text(
+                        self.username or "zalogowany", encoding="utf-8")
+                    self.logged_in = True
+                    log.warning("[KONTO] Zalogowano w oknie bota jako %s - profil ma teraz WŁASNĄ sesję.",
+                                self.username or "?")
+                    return True
+            await asyncio.sleep(3)
+        log.error("[KONTO] Nie wykryłem zalogowania w ciągu %d min.", timeout_s // 60)
+        return False
 
     def _headers_stamp(self):
         return str(self.headers_file.stat().st_mtime_ns)
@@ -131,7 +173,7 @@ class VintedAccount:
         Profil sam trzyma aktualne tokeny (Vinted je odświeża). Ponowne wgranie STAREGO access/refresh tokena
         z my_headers.txt przy każdym starcie nadpisywało te nowsze i kończyło się pętlą 'session-refresh'.
         """
-        if not self.headers_file.exists():
+        if not self.headers_file.exists() or self.has_own_login() or self._logging_in:
             return False
         marker = self.profile_dir / self.SEED_MARKER
         try:
@@ -143,6 +185,9 @@ class VintedAccount:
         """Wstrzykuje ciastka z my_headers.txt - tylko gdy needs_seed() (albo force)."""
         if not self.headers_file.exists():
             log.info("[KONTO] Brak %s - polegam na zapisanym profilu przeglądarki.", self.headers_file)
+            return [], None
+        if self.has_own_login():
+            log.info("[KONTO] Profil ma własne logowanie (--login) - nie używam %s.", self.headers_file.name)
             return [], None
         if not force and not self.needs_seed():
             log.info("[KONTO] Pomijam %s (już wgrany) - profil ma własne, odświeżane tokeny. "
@@ -666,10 +711,23 @@ async def main(argv=None):
     parser = argparse.ArgumentParser(description="Utrzymuje sesję konta Vinted 24/7 (bez proxy).")
     parser.add_argument("--reset", action="store_true",
                         help="wyczyść profil przeglądarki przed startem")
+    parser.add_argument("--login", action="store_true",
+                        help="czysty profil + RĘCZNE logowanie w oknie bota (własna sesja, zalecane)")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     cfg = ScoutConfig()
+    if args.login:
+        account = VintedAccount(cfg.account, cfg.log_dir)
+        account.reset_profile()
+        try:
+            ok = await account.interactive_login()
+        finally:
+            await account.close()
+        if ok:
+            print("\nGotowe - bot ma własne logowanie. Uruchom teraz: python -m sniper")
+            print("Nie wylogowuj się „ze wszystkich urządzeń” w Vinted - to zakończyłoby też sesję bota.")
+        return 0 if ok else 1
     if not cfg.account.enabled:
         print("Sesja konta wyłączona. Ustaw SNIPER_ACCOUNT_ENABLED=true w sniper/.env")
         return 1

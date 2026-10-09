@@ -266,3 +266,31 @@ def test_banners_ok_with_token_and_no_login_button_is_logged_in(tmp_path):
     account.context = _Ctx([{"name": "access_token_web", "value": "tok"}])
     account.headers_file = tmp_path / "brak.txt"
     assert asyncio.run(account.refresh_and_check()) is True
+
+
+def test_own_login_never_uses_my_headers(tmp_path):
+    """Po --login bot ma własną sesję: my_headers.txt (kopia z Edge) nie może jej nadpisać - ani przy starcie,
+    ani przy awaryjnym ponownym wgraniu."""
+    import asyncio
+    account = acc.VintedAccount(AccountConfig(), tmp_path)
+    account.profile_dir.mkdir(parents=True)
+    account.headers_file.write_text("curl 'https://www.vinted.pl/' -b 'access_token_web=KOPIA'", encoding="utf-8")
+    assert account.needs_seed() is True
+    (account.profile_dir / account.OWN_LOGIN_MARKER).write_text("szymooon_koala", encoding="utf-8")
+    assert account.has_own_login() and account.needs_seed() is False
+
+    class Ctx:
+        added = []
+
+        async def add_cookies(self, cookies):
+            self.added.append(cookies)
+    account.context = Ctx()
+    assert asyncio.run(account._seed_cookies(force=True)) == ([], None) and Ctx.added == []
+
+
+def test_no_seeding_while_logging_in(tmp_path):
+    account = acc.VintedAccount(AccountConfig(), tmp_path)
+    account.profile_dir.mkdir(parents=True)
+    account.headers_file.write_text("curl 'https://www.vinted.pl/' -b 'a=1'", encoding="utf-8")
+    account._logging_in = True
+    assert account.needs_seed() is False

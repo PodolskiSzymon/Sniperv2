@@ -145,6 +145,11 @@ python -m sniper.buyer "https://www.vinted.pl/items/XXXX-..." --max 30   # test 
 python -m sniper.buyer "https://www.vinted.pl/items/XXXX-..." --forget   # usuń fałszywy wpis z bought.jsonl i spróbuj
 ```
 
+**Logowanie bota (zalecane)**: `python -m sniper.account_session --login` czyści profil bota i otwiera jego okno -
+zaloguj się w nim RĘCZNIE (login, hasło, ewentualny kod). Bot dostaje własną sesję, którą sam odświeża; `my_headers.txt`
+(kopia sesji z Twojej przeglądarki) przestaje być używany - taka kopia wygasała po 1-2 h. Nie używaj potem w Vinted
+„wyloguj ze wszystkich urządzeń”, bo zakończy to też sesję bota.
+
 **Krok 4 - auto-zakup w Zwiadowcy (`sniper/autobuy.py`)**: przy `SNIPER_BUY_ENABLED=true` (i działającej ocenie AI)
 `python -m sniper` uruchamia też zalogowaną przeglądarkę konta. Gdy AI uzna ofertę za okazję z oceną
 >= `SNIPER_BUY_MIN_SCORE`, bot od razu ją kupuje (te same limity co wyżej, jeden zakup naraz) i wysyła mail z wynikiem:

@@ -60,8 +60,8 @@ class AutoBuyer:
         if not logged:
             self.ready = False
             log.error("[AUTO-BUY] Nie jesteś zalogowany na konto - auto-zakup WSTRZYMANY, okno zostaje otwarte "
-                      "(okazje idą zwykłym mailem). Wklej świeży cURL do my_headers.txt i zapisz - wgra się sam "
-                      "przy następnym sprawdzeniu (do 2 min).")
+                      "(okazje idą zwykłym mailem). Napraw: python -m sniper.account_session --login (ręczne "
+                      "logowanie w oknie bota), potem ponownie python -m sniper.")
             self._alert_session_lost()
             return True
         self.ready = True
@@ -185,19 +185,19 @@ class AutoBuyer:
         elif not alive and self.ready:
             self.ready = False
             log.error("[AUTO-BUY] Sesja konta padła - auto-zakup WSTRZYMANY (okazje idą zwykłym mailem). "
-                      "Wklej świeży cURL do my_headers.txt - wgra się sam przy następnym sprawdzeniu.")
+                      "Napraw: python -m sniper.account_session --login (ręczne logowanie w oknie bota).")
             self._alert_session_lost()
 
     def _alert_session_lost(self):
         self._alert("[Sniper] Sesja konta Vinted padła - auto-zakup WSTRZYMANY",
                     "Zwiadowca nie jest zalogowany na Twoje konto Vinted, więc NIE kupuje okazji "
-                    "(przychodzą zwykłym mailem). Okno przeglądarki konta zostaje otwarte.\n\nNaprawa:\n"
-                    "1. Zaloguj się na Vinted w swojej przeglądarce, F12 -> Sieć -> dowolne zapytanie do "
-                    "www.vinted.pl -> Kopiuj jako cURL (bash).\n"
-                    "2. Wklej to do sniper/logs/my_headers.txt i zapisz.\n"
-                    "Zwiadowca wgra nowe ciastka sam przy następnym sprawdzeniu sesji (do 2 min) "
-                    "i wznowi auto-zakup. Jeśli nie pomoże: zatrzymaj go i uruchom "
-                    "python -m sniper.account_session --reset.")
+                    "(przychodzą zwykłym mailem). Okno przeglądarki konta zostaje otwarte.\n\n"
+                    "Naprawa (zalecana - własne logowanie bota):\n"
+                    "1. Zatrzymaj Zwiadowcę (Ctrl+C).\n"
+                    "2. python -m sniper.account_session --login  -> zaloguj się RĘCZNIE w oknie, które się otworzy.\n"
+                    "3. python -m sniper\n\n"
+                    "Szybka alternatywa bez restartu: świeży cURL z F12 do sniper/logs/my_headers.txt (wgra się sam "
+                    "w ciągu 2 min) - ale taka kopia sesji z Twojej przeglądarki zwykle wygasa po 1-2 h.")
 
     def _alert(self, subject, body):
         if self.notifier is not None and hasattr(self.notifier, "notify_text"):
